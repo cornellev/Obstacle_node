@@ -1,0 +1,16 @@
+build
+.vscode
+log
+rosbags
+install
+*.DS_Store
+*.o
+*.d
+*.a
+*.aux
+*.fdb_latexmk
+*.out
+*.log
+*.fls
+_temp
+*.gz
