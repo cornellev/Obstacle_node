@@ -11,6 +11,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(cev_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(tf2 REQUIRED)
@@ -21,7 +22,7 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Obstacle.msg"
   "msg/ObstacleArray.msg"
-  DEPENDENCIES std_msgs geometry_msgs
+  DEPENDENCIES std_msgs geometry_msgs cev_msgs
 )
 
 add_executable(obstacle_node src/obstacle_node.cpp)
@@ -29,6 +30,7 @@ add_executable(obstacle_node src/obstacle_node.cpp)
 ament_target_dependencies(
   obstacle_node 
   rclcpp 
+  cev_msgs
   sensor_msgs 
   std_msgs 
   geometry_msgs
