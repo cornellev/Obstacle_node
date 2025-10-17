@@ -2,6 +2,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include "cev_msgs/msg/obstacles.hpp"
 #include "obstacle/msg/obstacle_array.hpp"
 
 #include <unordered_map>
@@ -27,6 +28,10 @@ public:
   ObstacleNode()
   : Node("obstacle_node")
   {
+    obs_sub_ = this->create_subscription<cev_msgs::msg::Obstacles>(
+      "/rslidar_obstacles", 10,
+      std::bind(&ObstacleNode::obstaclesCallback, this, std::placeholders::_1));
+
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "input_points", 10,
       std::bind(&ObstacleNode::pcCallback, this, std::placeholders::_1));
@@ -38,6 +43,17 @@ public:
   }
 
 private:
+  void obstaclesCallback(const cev_msgs::msg::Obstacles::SharedPtr msg)
+  {
+    RCLCPP_INFO(this->get_logger(), "Received Obstacles message with %zu clouds", msg->obstacles.size());
+    for (size_t i = 0; i < msg->obstacles.size(); ++i)
+    {
+        const auto &cloud = msg->obstacles[i];
+        auto cloud_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>(cloud);
+        pcCallback(cloud_ptr);
+    }
+  }
+
   void pcCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // check required fields
     bool has_x=false, has_y=false, has_z=false, has_id=false;
@@ -53,7 +69,6 @@ private:
       return;
     }
 
-    
     sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
     sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
     sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
@@ -74,8 +89,6 @@ private:
     RCLCPP_INFO(this->get_logger(),
                 "Received PointCloud2: points=%zu clusters=%zu",
                 total_points, clusters.size());
-
-
 
     // z-axis filtering
     const float z_min_allowed = 0.0f;   
@@ -215,9 +228,9 @@ private:
     }
     marker_pub_->publish(markers);
 
-
   }
 
+  rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Publisher<ObstacleArray>::SharedPtr obs_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
