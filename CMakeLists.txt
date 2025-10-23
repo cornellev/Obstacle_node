@@ -12,6 +12,9 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(cev_msgs REQUIRED)
+find_package(PCL REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(pcl_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(tf2 REQUIRED)
@@ -33,6 +36,8 @@ ament_target_dependencies(
   cev_msgs
   sensor_msgs 
   std_msgs 
+  pcl_conversions
+  pcl_ros
   geometry_msgs
   tf2
   tf2_geometry_msgs
@@ -40,8 +45,13 @@ ament_target_dependencies(
 )
 
 
+include_directories(
+  ${PCL_INCLUDE_DIRS}
+)
+
 target_link_libraries(obstacle_node
   ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
 )
 
 ament_export_dependencies(rosidl_default_runtime)

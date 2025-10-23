@@ -2,6 +2,10 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/common.h>
 #include "cev_msgs/msg/obstacles.hpp"
 #include "obstacle/msg/obstacle_array.hpp"
 
@@ -46,12 +50,18 @@ private:
   void obstaclesCallback(const cev_msgs::msg::Obstacles::SharedPtr msg)
   {
     RCLCPP_INFO(this->get_logger(), "Received Obstacles message with %zu clouds", msg->obstacles.size());
-    for (size_t i = 0; i < msg->obstacles.size(); ++i)
+    
+    sensor_msgs::msg::PointCloud2 merged_cloud = msg->obstacles[0];
+
+    for (size_t i = 1; i < msg->obstacles.size(); ++i)
     {
         const auto &cloud = msg->obstacles[i];
-        auto cloud_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>(cloud);
-        pcCallback(cloud_ptr);
+
+        pcl::concatenatePointCloud(merged_cloud, cloud, merged_cloud);
     }
+
+    auto cloud_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>(merged_cloud);
+    pcCallback(cloud_ptr);
   }
 
   void pcCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
@@ -86,9 +96,9 @@ private:
       ++total_points;
     }
 
-    RCLCPP_INFO(this->get_logger(),
-                "Received PointCloud2: points=%zu clusters=%zu",
-                total_points, clusters.size());
+    // RCLCPP_INFO(this->get_logger(),
+    //             "Received PointCloud2: points=%zu clusters=%zu",
+    //             total_points, clusters.size());
 
     // z-axis filtering
     const float z_min_allowed = 0.0f;   
@@ -114,18 +124,19 @@ private:
 
       if (!kept.empty()) {
         filtered_clusters[cid] = kept;
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d kept: %zu points (orig %zu, z_range=[%.2f, %.2f])",
-                    cid, kept.size(), pts.size(), z_min, z_max);
-      } else {
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d discarded (all points outside z range [%.2f, %.2f], orig z_range=[%.2f, %.2f])",
-                    cid, z_min_allowed, z_max_allowed, z_min, z_max);
-      }
+        // RCLCPP_INFO(this->get_logger(),
+        //             "Cluster %d kept: %zu points (orig %zu, z_range=[%.2f, %.2f])",
+        //             cid, kept.size(), pts.size(), z_min, z_max);
+      } 
+      // else {
+      //   RCLCPP_INFO(this->get_logger(),
+      //               "Cluster %d discarded (all points outside z range [%.2f, %.2f], orig z_range=[%.2f, %.2f])",
+      //               cid, z_min_allowed, z_max_allowed, z_min, z_max);
+      // }
     }
 
-    RCLCPP_INFO(this->get_logger(),
-                "After filtering: %zu clusters remain", filtered_clusters.size());
+    // RCLCPP_INFO(this->get_logger(),
+    //             "After filtering: %zu clusters remain", filtered_clusters.size());
 
     // === BEV projection + OBB ===
     ObstacleArray out;
@@ -188,9 +199,9 @@ private:
 
         out.obstacles.push_back(ob);
 
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d -> obstacle center=(%.2f,%.2f), L=%.2f W=%.2f yaw=%.2f rad",
-                    cid, cx, cy, length, width, yaw);
+        // RCLCPP_INFO(this->get_logger(),
+        //             "Cluster %d -> obstacle center=(%.2f,%.2f), L=%.2f W=%.2f yaw=%.2f rad",
+        //             cid, cx, cy, length, width, yaw);
     }
 
     // === publish ObstacleArray ===
@@ -202,6 +213,7 @@ private:
     for (const auto &ob : out.obstacles) {
         visualization_msgs::msg::Marker m;
         m.header = out.header;
+        m.header.frame_id = "rslidar";
         m.ns = "obstacle";
         m.id = id_counter++;
         m.type = visualization_msgs::msg::Marker::CUBE;
@@ -226,6 +238,10 @@ private:
 
         markers.markers.push_back(m);
     }
+
+    RCLCPP_INFO(rclcpp::get_logger("MarkerPrinter"),
+                "Visualizing %d clouds", (int) markers.markers.size());
+
     marker_pub_->publish(markers);
 
   }
@@ -235,6 +251,8 @@ private:
   rclcpp::Publisher<ObstacleArray>::SharedPtr obs_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 };
+
+#include "visualization_msgs/msg/marker_array.hpp"
 
 int main(int argc, char ** argv) {
   rclcpp::init(argc, argv);
