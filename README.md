@@ -1,3 +1,1 @@
 # Obstacle_node
-
-testing
