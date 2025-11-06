@@ -1,5 +1,5 @@
 # Obstacle_node
-Hi all, I'm going to start yapping again.
+Hi all, I'm going to start yapping again!
 
 ## Rasterization
 A raster is a digital image made up of a rectangular grid of pixels. We can say that an occupancy grid is essentially a raster, where obstacles will be represented as filled in pixels.

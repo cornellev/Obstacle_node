@@ -231,10 +231,7 @@ private:
         m.pose.position.z = (ob.z_min + ob.z_max) / 2.0;
 
         // color(convert cluster id to different color)
-        m.color.r = 1.0;
-        m.color.g = 0.0;
-        m.color.b = 0.0;
-        m.color.a = 0.5;
+        m.color = getColorFromId(m.id);
 
         markers.markers.push_back(m);
     }
@@ -244,6 +241,18 @@ private:
 
     marker_pub_->publish(markers);
 
+  }
+
+  std_msgs::msg::ColorRGBA getColorFromId(int cluster_id)
+  {
+    std_msgs::msg::ColorRGBA color;
+    uint32_t hash = static_cast<uint32_t>(cluster_id * 2654435761 % 4294967296); // Knuth's multiplicative hash
+    color.r = ((hash & 0xFF0000) >> 16) / 255.0f;
+    color.g = ((hash & 0x00FF00) >> 8) / 255.0f;
+    color.b = (hash & 0x0000FF) / 255.0f;
+    color.a = 0.5f;
+
+    return color;
   }
 
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
