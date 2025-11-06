@@ -17,6 +17,7 @@ find_package(pcl_conversions REQUIRED)
 find_package(pcl_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(slam_toolbox REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
@@ -54,6 +55,7 @@ ament_target_dependencies(
   pcl_conversions
   pcl_ros
   geometry_msgs
+  slam_toolbox
   tf2
   tf2_geometry_msgs
   visualization_msgs

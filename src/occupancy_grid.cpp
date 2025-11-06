@@ -6,8 +6,9 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/common.h>
-#include "cev_msgs/msg/obstacles.hpp"
-#include "obstacle/msg/obstacle_array.hpp"
+#include <nav_msgs/msg/occupancy_grid.hpp>
+#include <cev_msgs/msg/obstacles.hpp>
+#include <obstacle/msg/obstacle_array.hpp>
 
 #include <unordered_map>
 #include <vector>
@@ -19,6 +20,10 @@
 
 using obstacle::msg::ObstacleArray;
 
+constexpr double deg2rad(double deg) {
+    return deg * M_PI / 180.0;
+};
+
 struct PointXYZCluster {
   float x;
   float y;
@@ -26,22 +31,41 @@ struct PointXYZCluster {
   int32_t cluster_id;
 };
 
-class OccupancyGrid : public rclcpp::Node {
+ struct BinInfo {
+  BinInfo() = default;
+  BinInfo(const double _range, const double _wx, const double _wy)
+  : range(_range), wx(_wx), wy(_wy)
+  {
+  }
+  double range;
+  double wx;
+  double wy;
+};
+
+enum class CellState {
+  OCCUPIED,
+  UNKNOWN,
+  FREE
+};
+
+class OccupancyGridNode : public rclcpp::Node {
 public:
-  OccupancyGrid()
+  OccupancyGridNode()
   : Node("occupancy_grid")
   {
     obs_sub_ = this->create_subscription<cev_msgs::msg::Obstacles>(
       "/rslidar_obstacles", 10,
-      std::bind(&OccupancyGrid::obstaclesCallback, this, std::placeholders::_1));
+      std::bind(&OccupancyGridNode::obstaclesCallback, this, std::placeholders::_1));
 
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "input_points", 10,
-      std::bind(&OccupancyGrid::pcCallback, this, std::placeholders::_1));
+      std::bind(&OccupancyGridNode::pcCallback, this, std::placeholders::_1));
 
     bev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/bev_obstacles", 10);
 
-    RCLCPP_INFO(this->get_logger(), "OccupancyGrid started - waiting for PointCloud2 on 'input_points'");
+    grid_pub_ = this->create_publisher<nav_msgs::msg::OccupancyGrid>("/occupancy_grid", 10);
+
+    RCLCPP_INFO(this->get_logger(), "OccupancyGridNode started - waiting for PointCloud2 on 'input_points'");
   }
 
 private:
@@ -59,6 +83,7 @@ private:
     }
 
     auto cloud_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>(merged_cloud);
+
     pcCallback(cloud_ptr);
   }
 
@@ -82,6 +107,11 @@ private:
     sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
     sensor_msgs::PointCloud2ConstIterator<int32_t> iter_id(*msg, "id");
 
+    float min_x = std::numeric_limits<float>::max();
+    float min_y = std::numeric_limits<float>::max();
+    float max_x = std::numeric_limits<float>::lowest();
+    float max_y = std::numeric_limits<float>::lowest();
+
     std::unordered_map<int32_t, std::vector<PointXYZCluster>> clusters;
     size_t total_points = 0;
     for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z, ++iter_id) {
@@ -91,8 +121,40 @@ private:
       p.z = *iter_z;
       p.cluster_id = *iter_id;
       clusters[p.cluster_id].push_back(p);
+
+      min_x = std::min(min_x, p.x);
+      min_y = std::min(min_y, p.y);
+      max_x = std::max(max_x, p.x);
+      max_y = std::max(max_y, p.y);
+
       ++total_points;
     }
+
+    const float padding = 1.0f;
+    min_x -= padding;
+    min_y -= padding;
+    max_x += padding;
+    max_y += padding;
+
+    float cell_size = 0.2f;
+    float angle_increment = deg2rad(0.4);
+    // 26 fov has horizontal angle:  0.4°
+    int width = static_cast<int>((max_x - min_x) / cell_size);
+    int height = static_cast<int>((max_y - min_y) / cell_size);
+
+    grid_msg_.header.frame_id = "rslidar";
+    grid_msg_.info.resolution = cell_size;
+    grid_msg_.info.width = width;
+    grid_msg_.info.height = height;
+    grid_msg_.info.origin.position.x = min_x;
+    grid_msg_.info.origin.position.y = min_y;
+    grid_msg_.info.origin.position.z = 0.0;
+    grid_msg_.info.origin.orientation.x = 0.0;
+    grid_msg_.info.origin.orientation.y = 0.0;
+    grid_msg_.info.origin.orientation.z = 0.0;
+    grid_msg_.info.origin.orientation.w = 1.0;
+
+    grid_msg_.data.assign(width * height, static_cast<int8_t>(CellState::UNKNOWN));
 
     // z-axis filtering
     const float z_min_allowed = 0.0f;   
@@ -146,9 +208,6 @@ private:
     for (const auto &kv : filtered_clusters) {
       int cid = kv.first;
       const auto &pts = kv.second;
-      uint8_t r = static_cast<uint8_t>((kv.first * 53) % 255);
-      uint8_t g = static_cast<uint8_t>((kv.first * 97) % 255);
-      uint8_t b = static_cast<uint8_t>((kv.first * 193) % 255);
 
       if (pts.size() < 3) {
           RCLCPP_WARN(this->get_logger(),
@@ -162,28 +221,224 @@ private:
       float z_min = std::numeric_limits<float>::max();
       float z_max = std::numeric_limits<float>::lowest();
       for (const auto &p : pts) {
-          cv_points.emplace_back(p.x, p.y);
-          z_min = std::min(z_min, p.z);
-          z_max = std::max(z_max, p.z);
-          std_msgs::msg::ColorRGBA color = getColorFromId(cid);
+        cv_points.emplace_back(p.x, p.y);
+        z_min = std::min(z_min, p.z);
+        z_max = std::max(z_max, p.z);
+        std_msgs::msg::ColorRGBA color = getColorFromId(cid);
 
-          *out_x = p.x;
-          *out_y = p.y;
-          *out_z = 0.0f; 
-          *out_r = color.r * 255;
-          *out_g = color.g * 255;
-          *out_b = color.b * 255;
-          ++out_x; ++out_y; ++out_z;
-          ++out_r; ++out_g; ++out_b;
+        *out_x = p.x;
+        *out_y = p.y;
+        *out_z = 0.0f; 
+        *out_r = color.r * 255;
+        *out_g = color.g * 255;
+        *out_b = color.b * 255;
+        ++out_x; ++out_y; ++out_z;
+        ++out_r; ++out_g; ++out_b;
       }
     }
 
     bev_points.width = static_cast<uint32_t>(bev_points.data.size() / bev_points.point_step);
     bev_points.row_step = bev_points.point_step * bev_points.width;
 
+    // bev_points done -> get occupancy grid:
+    sensor_msgs::msg::PointCloud2 map_scan = worldScanToMap(*msg);
+    Obstacle2OccupancyGrid(*msg, map_scan, angle_increment);
+
     RCLCPP_INFO(this->get_logger(), "Publishing /bev_points of %zu points", bev_points.data.size());
     bev_pub_->publish(bev_points);
+    grid_pub_->publish(grid_msg_);
   }
+
+  // need ground segmentor before obstacle seg
+  void Obstacle2OccupancyGrid(
+    sensor_msgs::msg::PointCloud2 &world_scan,
+    sensor_msgs::msg::PointCloud2 &map_scan,
+    float angle_increment
+  ) {
+      // add step that transforms point cloud 
+      std::vector<std::vector<BinInfo>> obstacle_angle_bins;
+      std::vector<signed char> grid_points_(grid_msg_.info.width * grid_msg_.info.height, 50);
+      // 360 degrees
+      constexpr double min_angle = deg2rad(-180.0);
+      constexpr double max_angle = deg2rad(180.0);
+      const size_t angle_bin_size = ((max_angle - min_angle) / angle_increment) + size_t(1);
+      obstacle_angle_bins.resize(angle_bin_size);
+
+      // add obstacle points to their corresponding angle bins -> 1 bin per ray
+      for (sensor_msgs::PointCloud2ConstIterator<float> iter_x(world_scan, "x"), iter_y(world_scan, "y"), 
+        iter_wx(map_scan, "x"), iter_wy(map_scan, "y");
+        iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_wx, ++iter_wy) 
+        {
+          const double angle = atan2(*iter_y, *iter_x);
+          int angle_bin_idx = (angle - min_angle) / angle_increment;
+          obstacle_angle_bins.at(angle_bin_idx)
+            .push_back(BinInfo(std::hypot(*iter_y, *iter_x), *iter_wx, *iter_wy));
+      }
+      
+      // double ox = std::floor(grid_msg_.info.origin.position.x / grid_msg_.info.resolution);
+      // double oy = std::floor(grid_msg_.info.origin.position.y / grid_msg_.info.resolution);
+      // // sort by distance 
+      // for (auto & obstacle_angle_bin : obstacle_angle_bins) {
+      //   std::sort(obstacle_angle_bin.begin(), obstacle_angle_bin.end(),
+      //   [](auto a, auto b) { return a.range < b.range; });
+      // }
+
+      //   // initialize cells to the final point with freespace
+      // for (size_t bin_idx = 0; bin_idx < obstacle_angle_bins.size(); ++bin_idx) {
+      //   // iterate through all angle_bins, find the farthest point of each bin -> last element
+      //   auto & obstacle_angle_bin = obstacle_angle_bins.at(bin_idx);
+
+      //   BinInfo end_distance;
+      //   if (obstacle_angle_bin.empty()) {
+      //     continue;
+      //   } else {
+      //     end_distance = obstacle_angle_bin.back(); // furthest away point
+      //   }
+      //   // from origin to farthest point are all FREE initially
+      //   rayTrace(ox, oy, end_distance.wx, end_distance.wy, CellState::FREE);
+
+      //   // later implement method that takes into account blindspot behind obstacles -> UNKNOWN
+        
+      //   // fill in obstacle points as OCCUPIED
+      //   fillOccupied(obstacle_angle_bins, 0.0);
+      // }
+  }
+
+  void setCellValue(double x, double y, CellState state) {
+    int xi = static_cast<int>(x);
+    int yi = static_cast<int>(y);
+    if (xi < 0 || yi < 0 ||
+        xi >= static_cast<int>(grid_msg_.info.width) ||
+        yi >= static_cast<int>(grid_msg_.info.height))
+        return; // skip out-of-bounds
+
+    size_t index = yi * grid_msg_.info.width + xi;
+    switch (state) {
+      case CellState::OCCUPIED: grid_msg_.data[index] = 97; break;
+      case CellState::UNKNOWN:  grid_msg_.data[index] = 50; break;
+      case CellState::FREE:     grid_msg_.data[index] = 3;  break;
+    }
+  }
+
+  void fillOccupied(std::vector<std::vector<BinInfo>> obstacle_angle_bins, double distance_margin) {
+    for (size_t bin_idx = 0; bin_idx < obstacle_angle_bins.size(); ++bin_idx) {
+      auto & obstacle_angle_bin = obstacle_angle_bins.at(bin_idx);
+      for (size_t dist_idx = 0; dist_idx < obstacle_angle_bin.size(); ++dist_idx) {
+        const auto & source = obstacle_angle_bin.at(dist_idx);
+        setCellValue(source.wx, source.wy, CellState::OCCUPIED);
+
+        if (dist_idx + 1 == obstacle_angle_bin.size()) {
+          continue;
+        }
+
+        auto next_dist = std::abs(
+          obstacle_angle_bin.at(dist_idx + 1).range -
+          obstacle_angle_bin.at(dist_idx).range);
+        // the distance_margin should be
+        //     obstacle height |\
+        //                     | \ -> angle is vertical fov
+        //                     ----
+        //obstacle dist from og    intersect w/ ground
+        if (next_dist <= distance_margin) {
+          const auto & source = obstacle_angle_bin.at(dist_idx);
+          const auto & target = obstacle_angle_bin.at(dist_idx + 1);
+          rayTrace(source.wx, source.wy, target.wx, target.wy, CellState::OCCUPIED);
+          continue;
+        }
+      }
+    }
+  }
+
+  // function to convert world (PointCloud2) coordinates to map coordinates
+  bool worldToMap(float wx, float wy, unsigned int &mx, unsigned int &my) {
+    mx = static_cast<int>(std::floor(fabs((wx - (grid_msg_.info.origin.position.x)) / grid_msg_.info.resolution)));
+    my = static_cast<int>(std::floor(fabs((wy - (grid_msg_.info.origin.position.y)) / grid_msg_.info.resolution)));
+    if (mx < grid_msg_.info.width && my < grid_msg_.info.height) {
+      return true;
+    }
+    return false;
+  }
+
+  sensor_msgs::msg::PointCloud2 worldScanToMap(sensor_msgs::msg::PointCloud2 &world_scan) {
+    sensor_msgs::msg::PointCloud2 map_scan;
+    map_scan.header = world_scan.header;
+    map_scan.height = 1;
+    map_scan.is_dense = false;
+    map_scan.is_bigendian = false;
+
+    size_t n_points = world_scan.width * world_scan.height;
+
+    std::string id_field;
+    for (const auto &f : world_scan.fields) {
+        if (f.name == "id" || f.name == "cluster_id") {
+            id_field = f.name;
+            break;
+        }
+    }
+
+    sensor_msgs::PointCloud2Modifier modifier(map_scan);
+    modifier.setPointCloud2Fields(
+      4,
+      "x", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "y", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "z", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "id", 1, sensor_msgs::msg::PointField::UINT32
+    );
+
+    modifier.resize(n_points);
+    map_scan.width = n_points;
+    map_scan.row_step = map_scan.point_step * map_scan.width;
+
+    sensor_msgs::PointCloud2ConstIterator<float> iter_x(world_scan, "x");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_y(world_scan, "y");
+    sensor_msgs::PointCloud2ConstIterator<float> iter_z(world_scan, "z");
+    sensor_msgs::PointCloud2ConstIterator<int32_t> iter_id(world_scan, id_field);
+
+    sensor_msgs::PointCloud2Iterator<float> mx(map_scan, "x");
+    sensor_msgs::PointCloud2Iterator<float> my(map_scan, "y");
+    sensor_msgs::PointCloud2Iterator<float> mz(map_scan, "z");
+    sensor_msgs::PointCloud2Iterator<int32_t> mid(map_scan, "id");
+
+    // Iterate through all points
+    for (size_t i = 0; i < n_points; ++i, ++iter_x, ++iter_y, ++iter_z, ++iter_id, ++mx, ++my, ++mz, ++mid)
+    {
+        float wx = *iter_x;
+        float wy = *iter_y;
+
+        if (!std::isfinite(wx) || !std::isfinite(wy)) continue;
+        if (grid_msg_.info.resolution <= 0.0) continue;
+        
+        *mx = std::floor(fabs((wx - (grid_msg_.info.origin.position.x)) / grid_msg_.info.resolution));
+        *my = std::floor(fabs((wy - (grid_msg_.info.origin.position.y)) / grid_msg_.info.resolution));
+        *mz = 0.0;
+        *mid = *iter_id;
+    }
+
+    return map_scan;
+  }
+
+  // implement Bresenham's line algo for ray tracing
+  void rayTrace(double ox, double oy, double tx, double ty, CellState state) {
+      // ray defined by (ox, oy) + (tx - ox, ty - oy) * t;
+      int x = static_cast<int>(ox);
+      int y = static_cast<int>(oy);
+      int x_end = static_cast<int>(tx);
+      int y_end = static_cast<int>(ty);
+
+      int dx = std::abs(x_end - x);
+      int dy = std::abs(y_end - y);
+      int sx = (x < x_end) ? 1 : -1;
+      int sy = (y < y_end) ? 1 : -1;
+      int err = dx - dy;
+
+      while (true) {
+        setCellValue(x, y, state);
+        if (x == x_end && y == y_end) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 < dx)  { err += dx; y += sy; }
+      }
+    }
 
   std_msgs::msg::ColorRGBA getColorFromId(int cluster_id)
   {
@@ -200,11 +455,13 @@ private:
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr bev_pub_;
+  rclcpp::Publisher<nav_msgs::msg::OccupancyGrid>::SharedPtr grid_pub_;
+  nav_msgs::msg::OccupancyGrid grid_msg_;
 };
 
 int main(int argc, char ** argv) {
   rclcpp::init(argc, argv);
-  auto node = std::make_shared<OccupancyGrid>();
+  auto node = std::make_shared<OccupancyGridNode>();
   rclcpp::spin(node);
   rclcpp::shutdown();
   return 0;
