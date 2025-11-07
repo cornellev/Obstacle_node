@@ -255,7 +255,7 @@ private:
 
     map_modifier.resize(total_kept_points);
 
-    worldScanToMap(filtered_clusters, map_scan);
+    worldToMap(filtered_clusters, map_scan);
     Obstacle2OccupancyGrid(bev_points, map_scan, angle_increment);
 
     bev_pub_->publish(bev_points);
@@ -325,7 +325,7 @@ private:
     if (xi < 0 || yi < 0 ||
         xi >= static_cast<int>(grid_msg_.info.width) ||
         yi >= static_cast<int>(grid_msg_.info.height))
-        return; // skip out-of-bounds
+        return;
 
     size_t index = yi * grid_msg_.info.width + xi;
     switch (state) {
@@ -364,17 +364,7 @@ private:
     }
   }
 
-  // function to convert world (PointCloud2) coordinates to map coordinates
-  bool worldToMap(float wx, float wy, unsigned int &mx, unsigned int &my) {
-    mx = static_cast<int>(std::floor(fabs((wx - (grid_msg_.info.origin.position.x)) / grid_msg_.info.resolution)));
-    my = static_cast<int>(std::floor(fabs((wy - (grid_msg_.info.origin.position.y)) / grid_msg_.info.resolution)));
-    if (mx < grid_msg_.info.width && my < grid_msg_.info.height) {
-      return true;
-    }
-    return false;
-  }
-
-  void worldScanToMap(std::unordered_map<int32_t, std::vector<PointXYZCluster>> &world_scan, sensor_msgs::msg::PointCloud2 &map_scan) {
+  void worldToMap(std::unordered_map<int32_t, std::vector<PointXYZCluster>> &world_scan, sensor_msgs::msg::PointCloud2 &map_scan) {
     sensor_msgs::PointCloud2Iterator<float> mx(map_scan, "x");
     sensor_msgs::PointCloud2Iterator<float> my(map_scan, "y");
     sensor_msgs::PointCloud2Iterator<float> mz(map_scan, "z");
