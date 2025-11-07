@@ -71,8 +71,6 @@ public:
 private:
   void obstaclesCallback(const cev_msgs::msg::Obstacles::SharedPtr msg)
   {
-    // RCLCPP_INFO(this->get_logger(), "Received Obstacles message with %zu clouds", msg->obstacles.size());
-    
     sensor_msgs::msg::PointCloud2 merged_cloud = msg->obstacles[0];
 
     for (size_t i = 1; i < msg->obstacles.size(); ++i)
@@ -241,10 +239,25 @@ private:
     bev_points.row_step = bev_points.point_step * bev_points.width;
 
     // bev_points done -> get occupancy grid:
-    sensor_msgs::msg::PointCloud2 map_scan = worldScanToMap(*msg);
-    Obstacle2OccupancyGrid(*msg, map_scan, angle_increment);
+    sensor_msgs::msg::PointCloud2 map_scan;
+    map_scan.header = out.header;
+    map_scan.header.frame_id = "rslidar";
+    map_scan.height = 1;
 
-    RCLCPP_INFO(this->get_logger(), "Publishing /bev_points of %zu points", bev_points.data.size());
+    sensor_msgs::PointCloud2Modifier map_modifier(map_scan);
+    map_modifier.setPointCloud2Fields(
+      4,
+      "x", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "y", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "z", 1, sensor_msgs::msg::PointField::FLOAT32,
+      "id", 1, sensor_msgs::msg::PointField::UINT32
+    );
+
+    map_modifier.resize(total_kept_points);
+
+    worldScanToMap(filtered_clusters, map_scan);
+    Obstacle2OccupancyGrid(bev_points, map_scan, angle_increment);
+
     bev_pub_->publish(bev_points);
     grid_pub_->publish(grid_msg_);
   }
@@ -265,6 +278,8 @@ private:
       obstacle_angle_bins.resize(angle_bin_size);
 
       // add obstacle points to their corresponding angle bins -> 1 bin per ray
+      RCLCPP_INFO(this->get_logger(), "world_scan %zu and map_scan %zu", world_scan.data.size(), map_scan.data.size());
+
       for (sensor_msgs::PointCloud2ConstIterator<float> iter_x(world_scan, "x"), iter_y(world_scan, "y"), 
         iter_wx(map_scan, "x"), iter_wy(map_scan, "y");
         iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_wx, ++iter_wy) 
@@ -275,33 +290,33 @@ private:
             .push_back(BinInfo(std::hypot(*iter_y, *iter_x), *iter_wx, *iter_wy));
       }
       
-      // double ox = std::floor(grid_msg_.info.origin.position.x / grid_msg_.info.resolution);
-      // double oy = std::floor(grid_msg_.info.origin.position.y / grid_msg_.info.resolution);
-      // // sort by distance 
-      // for (auto & obstacle_angle_bin : obstacle_angle_bins) {
-      //   std::sort(obstacle_angle_bin.begin(), obstacle_angle_bin.end(),
-      //   [](auto a, auto b) { return a.range < b.range; });
-      // }
+      double ox = std::floor(grid_msg_.info.origin.position.x / grid_msg_.info.resolution);
+      double oy = std::floor(grid_msg_.info.origin.position.y / grid_msg_.info.resolution);
+      // sort by distance 
+      for (auto & obstacle_angle_bin : obstacle_angle_bins) {
+        std::sort(obstacle_angle_bin.begin(), obstacle_angle_bin.end(),
+        [](auto a, auto b) { return a.range < b.range; });
+      }
 
-      //   // initialize cells to the final point with freespace
-      // for (size_t bin_idx = 0; bin_idx < obstacle_angle_bins.size(); ++bin_idx) {
-      //   // iterate through all angle_bins, find the farthest point of each bin -> last element
-      //   auto & obstacle_angle_bin = obstacle_angle_bins.at(bin_idx);
+        // initialize cells to the final point with freespace
+      for (size_t bin_idx = 0; bin_idx < obstacle_angle_bins.size(); ++bin_idx) {
+        // iterate through all angle_bins, find the farthest point of each bin -> last element
+        auto & obstacle_angle_bin = obstacle_angle_bins.at(bin_idx);
 
-      //   BinInfo end_distance;
-      //   if (obstacle_angle_bin.empty()) {
-      //     continue;
-      //   } else {
-      //     end_distance = obstacle_angle_bin.back(); // furthest away point
-      //   }
-      //   // from origin to farthest point are all FREE initially
-      //   rayTrace(ox, oy, end_distance.wx, end_distance.wy, CellState::FREE);
+        BinInfo end_distance;
+        if (obstacle_angle_bin.empty()) {
+          continue;
+        } else {
+          end_distance = obstacle_angle_bin.back(); // furthest away point
+        }
+        // from origin to farthest point are all FREE initially
+        rayTrace(ox, oy, end_distance.wx, end_distance.wy, CellState::FREE);
 
-      //   // later implement method that takes into account blindspot behind obstacles -> UNKNOWN
+        // later implement method that takes into account blindspot behind obstacles -> UNKNOWN
         
-      //   // fill in obstacle points as OCCUPIED
-      //   fillOccupied(obstacle_angle_bins, 0.0);
-      // }
+        // fill in obstacle points as OCCUPIED
+        fillOccupied(obstacle_angle_bins, 0.0);
+      }
   }
 
   void setCellValue(double x, double y, CellState state) {
@@ -359,62 +374,29 @@ private:
     return false;
   }
 
-  sensor_msgs::msg::PointCloud2 worldScanToMap(sensor_msgs::msg::PointCloud2 &world_scan) {
-    sensor_msgs::msg::PointCloud2 map_scan;
-    map_scan.header = world_scan.header;
-    map_scan.height = 1;
-    map_scan.is_dense = false;
-    map_scan.is_bigendian = false;
-
-    size_t n_points = world_scan.width * world_scan.height;
-
-    std::string id_field;
-    for (const auto &f : world_scan.fields) {
-        if (f.name == "id" || f.name == "cluster_id") {
-            id_field = f.name;
-            break;
-        }
-    }
-
-    sensor_msgs::PointCloud2Modifier modifier(map_scan);
-    modifier.setPointCloud2Fields(
-      4,
-      "x", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "y", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "z", 1, sensor_msgs::msg::PointField::FLOAT32,
-      "id", 1, sensor_msgs::msg::PointField::UINT32
-    );
-
-    modifier.resize(n_points);
-    map_scan.width = n_points;
-    map_scan.row_step = map_scan.point_step * map_scan.width;
-
-    sensor_msgs::PointCloud2ConstIterator<float> iter_x(world_scan, "x");
-    sensor_msgs::PointCloud2ConstIterator<float> iter_y(world_scan, "y");
-    sensor_msgs::PointCloud2ConstIterator<float> iter_z(world_scan, "z");
-    sensor_msgs::PointCloud2ConstIterator<int32_t> iter_id(world_scan, id_field);
-
+  void worldScanToMap(std::unordered_map<int32_t, std::vector<PointXYZCluster>> &world_scan, sensor_msgs::msg::PointCloud2 &map_scan) {
     sensor_msgs::PointCloud2Iterator<float> mx(map_scan, "x");
     sensor_msgs::PointCloud2Iterator<float> my(map_scan, "y");
     sensor_msgs::PointCloud2Iterator<float> mz(map_scan, "z");
     sensor_msgs::PointCloud2Iterator<int32_t> mid(map_scan, "id");
 
-    // Iterate through all points
-    for (size_t i = 0; i < n_points; ++i, ++iter_x, ++iter_y, ++iter_z, ++iter_id, ++mx, ++my, ++mz, ++mid)
-    {
-        float wx = *iter_x;
-        float wy = *iter_y;
+    for (const auto &kv : world_scan) {
+      int cid = kv.first;
+      const auto &pts = kv.second;
 
-        if (!std::isfinite(wx) || !std::isfinite(wy)) continue;
-        if (grid_msg_.info.resolution <= 0.0) continue;
-        
-        *mx = std::floor(fabs((wx - (grid_msg_.info.origin.position.x)) / grid_msg_.info.resolution));
-        *my = std::floor(fabs((wy - (grid_msg_.info.origin.position.y)) / grid_msg_.info.resolution));
+      for (const auto &p : pts) {
+        *mx = std::floor(fabs((p.x - (grid_msg_.info.origin.position.x)) / grid_msg_.info.resolution));
+        *my = std::floor(fabs((p.y - (grid_msg_.info.origin.position.y)) / grid_msg_.info.resolution));
         *mz = 0.0;
-        *mid = *iter_id;
+        *mid = cid;
+
+        ++mx; ++my; ++mz; ++mid;
+      }
     }
 
-    return map_scan;
+    map_scan.width = static_cast<uint32_t>(map_scan.data.size() / map_scan.point_step);
+    map_scan.row_step = map_scan.point_step * map_scan.width;
+
   }
 
   // implement Bresenham's line algo for ray tracing
