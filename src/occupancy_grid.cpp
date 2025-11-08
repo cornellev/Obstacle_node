@@ -134,7 +134,7 @@ private:
     max_x += padding;
     max_y += padding;
 
-    float cell_size = 0.2f;
+    float cell_size = 0.05f;
     float angle_increment = deg2rad(0.4);
     // 26 fov has horizontal angle:  0.4°
     int width = static_cast<int>((max_x - min_x) / cell_size);
@@ -286,6 +286,7 @@ private:
         {
           const double angle = atan2(*iter_y, *iter_x);
           int angle_bin_idx = (angle - min_angle) / angle_increment;
+          // BinInfo(l2-dist of obstacle point from origin, x, y)
           obstacle_angle_bins.at(angle_bin_idx)
             .push_back(BinInfo(std::hypot(*iter_y, *iter_x), *iter_wx, *iter_wy));
       }
