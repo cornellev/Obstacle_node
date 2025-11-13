@@ -37,7 +37,7 @@ public:
       std::bind(&ObstacleNode::obstaclesCallback, this, std::placeholders::_1));
 
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/rslidar_clusters", 10,
+      "input_points", 10,
       std::bind(&ObstacleNode::pcCallback, this, std::placeholders::_1));
 
     obs_pub_ = this->create_publisher<ObstacleArray>("obstacles", 10);

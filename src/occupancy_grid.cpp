@@ -58,7 +58,7 @@ public:
       std::bind(&OccupancyGridNode::obstaclesCallback, this, std::placeholders::_1));
 
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "input_points", 10,
+      "/rslidar_clusters", 10,
       std::bind(&OccupancyGridNode::pcCallback, this, std::placeholders::_1));
 
     bev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/bev_obstacles", 10);
