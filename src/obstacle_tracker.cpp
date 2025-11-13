@@ -32,9 +32,12 @@ public:
   ObstacleTracker()
   : Node("obstacle_tracker")
   {
+    // nearest neighbor association method -> MHT
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_clusters", 10,
       std::bind(&ObstacleTracker::pcCallback, this, std::placeholders::_1));
+
+    // maybe implement joint probability data association (JPDA) also for clustering
 
     RCLCPP_INFO(this->get_logger(), "ObstacleTracker started - waiting for PointCloud2 on 'input_points'");
   }
@@ -60,43 +63,63 @@ private:
     sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
     sensor_msgs::PointCloud2ConstIterator<int32_t> iter_id(*msg, "id");
 
-    std::unordered_map<int32_t, std::vector<PointXYZCluster>> clusters;
+    // get transformation matrix from 3d icp between *msg and *msg_prev_;
+
+    std::unordered_map<int32_t, std::vector<PointXYZCluster>> C;
     size_t total_points = 0;
     for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z, ++iter_id) {
-      PointXYZCluster p;
-      p.x = *iter_x;
-      p.y = *iter_y;
-      p.z = *iter_z;
-      p.cluster_id = *iter_id;
-      clusters[p.cluster_id].push_back(p);
+      PointXYZCluster c;
+      c.x = *iter_x;
+      c.y = *iter_y;
+      c.z = *iter_z;
+      c.cluster_id = *iter_id;
+      C[c.cluster_id].push_back(c);
       ++total_points;
     }
 
-    std::unordered_map<int32_t, std::vector<PointXYZCluster>> filtered_clusters;
+    // after all the cluster matching and whatever is done, update C_prev
+    // we can also use this to determine static v. dynamic obstacles
 
-    for (const auto &kv : clusters) {
-      int cid = kv.first;
-      const auto &pts = kv.second;
+    msg_prev_ = msg;
+    C_prev_ = C;
+  }
 
-      std::vector<PointXYZCluster> kept;
-      float z_min = std::numeric_limits<float>::max();
-      float z_max = std::numeric_limits<float>::lowest();
+  void multi_hypothesis_tracking(std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev, 
+                                 std::unordered_map<int32_t, std::vector<PointXYZCluster>> C) {
+    // takes in ??? vector<clusters> or the entire point cloud idrk
+    // tbh for both MHT and max bipartite matching, might need to consider all
+    // possible matches
+    // or like icp_cost_bipartite_matching is a way to generate all possible 
+    // association hypothesis -> run SHT -> reduce number of hypotheses
+  }
 
-      for (const auto &p : pts) {
-        z_min = std::min(z_min, p.z);
-        z_max = std::max(z_max, p.z);
-        if (p.z >= z_min_allowed && p.z <= z_max_allowed) {
-          kept.push_back(p);
-        }
-      }
+  void icp_cost_bipartite_matching(std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev, 
+                                   std::unordered_map<int32_t, std::vector<PointXYZCluster>> C,
+                                   double cost_threshold)  {
+    // a way to implement MHT for clusters
 
-      if (!kept.empty()) {
-        filtered_clusters[cid] = kept;
-      } 
-    }
+    // matching on a bipartite graph where red vertices correspond to previous
+    // clusters at timestamp t-1 and black vertices correspond to current
+    // clusters at timestamp t
+    // we construct a fully connected (WLOG, each red vertex connected to all 
+    // black vertices) bipartite graph where the weight of edge connecting each
+    // red-black vertex pair is defined by the quantitative ICP overlaying cost
+    // thing between the two clusters (maybe like determined by the returned
+    // transformation matrix [R | t])
+    // somehow think about this?
+    // unmatched black (t) vertices are maybe categorized as new obstacles?
+    // unique id for clusters so we can do more long term obstacle tracking for
+    // the same cluster
+
+    // complexity reduction / pruning: 
+    // there should be a cost_threshold -> don't even create an edge if 
+    // weight < cost_threshold
+    // cost func should consider diff in shape, position, orientation, # points -> ICP
 
   }
 
+  sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;
+  std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
 };
 

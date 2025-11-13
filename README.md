@@ -8,3 +8,5 @@ Hi all, I'm going to start yapping again!
 
 # Important Links
 [Rasterize a point cloud](https://r-lidar.github.io/lasR/reference/rasterize.html)
+
+[Dynamic Obstacle Detection and Tracking Based on 3D Lidar](https://www.jstage.jst.go.jp/article/jaciii/22/5/22_602/_pdf)
