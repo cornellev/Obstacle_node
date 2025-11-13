@@ -31,6 +31,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 
 add_executable(obstacle_node src/obstacle_node.cpp)
 add_executable(occupancy_grid src/occupancy_grid.cpp)
+add_executable(obstacle_tracker src/obstacle_tracker.cpp)
 
 ament_target_dependencies(
   obstacle_node 
@@ -61,6 +62,21 @@ ament_target_dependencies(
   visualization_msgs
 )
 
+ament_target_dependencies(
+  obstacle_tracker
+  rclcpp 
+  cev_msgs
+  sensor_msgs 
+  std_msgs
+  nav_msgs
+  pcl_conversions
+  pcl_ros
+  geometry_msgs
+  tf2
+  tf2_geometry_msgs
+  visualization_msgs
+)
+
 include_directories(
   ${PCL_INCLUDE_DIRS}
 )
@@ -75,17 +91,26 @@ target_link_libraries(occupancy_grid
   ${PCL_LIBRARIES}
 )
 
+target_link_libraries(obstacle_tracker
+  ${OpenCV_LIBS}
+  ${PCL_LIBRARIES}
+)
+
 ament_export_dependencies(rosidl_default_runtime)
 
 rosidl_target_interfaces(obstacle_node
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-  rosidl_target_interfaces(occupancy_grid
+rosidl_target_interfaces(occupancy_grid
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+rosidl_target_interfaces(obstacle_tracker
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 install(TARGETS
   obstacle_node
   occupancy_grid
+  obstacle_tracker
   DESTINATION lib/${PROJECT_NAME})
 
 
