@@ -22,7 +22,6 @@ find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
-
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Obstacle.msg"
   "msg/ObstacleArray.msg"
@@ -77,6 +76,11 @@ ament_target_dependencies(
   visualization_msgs
 )
 
+set(CEV_ICP_INCLUDE lib/cev_icp/include)
+set(CEV_ICP_LIB lib/cev_icp/lib)
+
+include_directories(${CEV_ICP_INCLUDE})
+link_directories(${CEV_ICP_LIB})
 include_directories(
   ${PCL_INCLUDE_DIRS}
 )
@@ -94,6 +98,7 @@ target_link_libraries(occupancy_grid
 target_link_libraries(obstacle_tracker
   ${OpenCV_LIBS}
   ${PCL_LIBRARIES}
+  cevicp
 )
 
 ament_export_dependencies(rosidl_default_runtime)
