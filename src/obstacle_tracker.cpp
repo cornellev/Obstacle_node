@@ -207,6 +207,8 @@ private:
     // allow unmatched bidders: can assign matches s.t. (c_prev, null): c_prev's
     // obstacle disappeared
     // or (null, c): c's obstacle newly appeared in frame
+    // WLOG: if there are no c_prev's remaining or if all remaining c_prev's have cost > threshold
+    // then (null, c)
   }
 
   sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;

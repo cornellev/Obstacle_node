@@ -6,6 +6,15 @@ Hi all, I'm going to start yapping again!
 ![Occupancy Grid 1](demos/occ.png)
 ![Occupancy Grid 2](demos/occupancygrid.png)
 
+## Multi-Hypothesis Tracking
+```
+cd Obstacle_node
+git submodule add https://github.com/cornellev/icp.git lib/cev_icp
+git submodule update --init --recursive
+cd lib/cev_icp
+sudo make install LIB_INSTALL=/usr/local/lib HEADER_INSTALL=/usr/local/include
+```
+
 # Important Links
 [Rasterize a point cloud](https://r-lidar.github.io/lasR/reference/rasterize.html)
 
