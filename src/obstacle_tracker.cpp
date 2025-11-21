@@ -89,7 +89,7 @@ private:
       ++total_points;
     }
 
-    // RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_prev_.size(), C.size());
+    RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_prev_.size(), C.size());
     // after all the cluster matching and whatever is done, update C_prev
     // we can also use this to determine static v. dynamic obstacles
 
@@ -118,13 +118,18 @@ private:
     std::vector<sensor_msgs::msg::PointCloud2> C_PREV = obs_msg_prev_;
     std::vector<sensor_msgs::msg::PointCloud2> C_CURR = msg->obstacles;
     // or maybe a mapping from (c_prev, c) -> edge weight, we'll see
+    // hungarian algorithm takes in cost (adjacency) matrix where C_CURR is row
+    // C_PREV is col
     std::vector<Edge> E;
+    // std::vector<std::vector<float>> C(C_CURR.size(), std::vector<float>(C_PREV.size(), 0.0));
+    Eigen::MatrixXf cost_matrix(C_CURR.size(), C_PREV.size());
 
     // bipartite graph construction:
     // C_PREV (t-1), C_CURR (t): sets of clusters at time t-1 and t, C_PREV \intersect C_CURR = \emptyset
     // E: set of edges with elements (c_prev, c) s.t. c_prev \in C_PREV and c \in C_CURR
     // set cluster_ids of c \in C_CURR to be the bipartite matched cluster_ids of c_prev \in C_PREV:
     // i.e. if (c_prev, c) is a match in max bipartite match, then set cluster_id of c_prev to be cluster_id of c
+    float max_cost = 0.0;
     for (int i = 0; i < C_CURR.size(); ++i) {
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
@@ -141,18 +146,22 @@ private:
             driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
             auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
 
-            // check whether translation between the two clusters are within max_radius (which we can define dynamically by past cluster's velocity)
-            std::cout << "Translation: " << result.transform.translation() << "\n";
-            std::cout << "Cost: " << result.cost << "\n";
+            if (result.cost > max_cost) max_cost = result.cost;
 
+            // check whether translation between the two clusters are within max_radius (which we can define dynamically by past cluster's velocity)
             Edge edge;
             edge.edge = std::make_tuple(j, i);
             edge.weight = result.cost;
 
             E.push_back(edge);
+            // C[i][j] = result.cost;
+            cost_matrix(i, j) = result.cost;
         }
     }
 
+    // hungarian_assignment(cost_matrix, max_cost);
+    // if (mat.size() <= mat[0].size()) std::vector<float> assignments = hungarian_assignment(C, max_cost);
+    RCLCPP_INFO(this->get_logger(), "done");
     obs_msg_prev_ = msg->obstacles;
   }
 
@@ -175,9 +184,12 @@ private:
     //      -> denote as {Y(T_j, Z_j)}
   }
 
-  void max_bipartite_matching(std::vector<sensor_msgs::msg::PointCloud2> C_PREV,
-                              std::vector<sensor_msgs::msg::PointCloud2> C_CURR,
-                              std::vector<Edge> E)  {
+  constexpr bool ckmin(float& a, const float& b) { 
+      return b < a ? a = b, true : false; 
+  }
+
+  // void hungarian_assignment(Eigen::MatrixXf mat, float max_cost)  {
+  std::vector<float> hungarian_assignment(std::vector<std::vector<float>> mat, float max_cost)  {
     // a way to implement MHT for clusters
 
     // matching on a bipartite graph where red vertices correspond to previous
@@ -198,6 +210,68 @@ private:
     // weight < cost_threshold
     // cost func should consider diff in shape, position, orientation, # points -> ICP
 
+    // make matrix square: unassigned cells have val > max_cost
+    // eventually, if some assignment (c_prev, c) has weight > max_cost, remove that matching
+    // Eigen::Index n = std::max(mat.rows(), mat.cols());
+    // Eigen::MatrixXf cost_matrix = Eigen::MatrixXf::Constant(n, n, max_cost + 1.0);
+    // cost_matrix.block(0, 0, mat.rows(), mat.cols()) = mat;
+
+    // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
+    const int J = mat.size(); // cost_matrix.rows();
+    const int W = mat[0].size(); // cost_matrix.cols();
+
+    // Eigen::VectorXf ys(J);
+    // Eigen::VectorXf yt(W + 1);
+    // Eigen::VectorXf answers;
+    std::vector<int> job(W + 1, -1);
+    std::vector<float> ys(J);
+    std::vector<float> yt(W + 1);
+    std::vector<float> answers;
+
+    const float inf = std::numeric_limits<float>::max();
+    for (int jCur = 0; jCur < J; ++jCur) {  // assign jCur-th job
+      int wCur = W;
+      job[wCur] = jCur;
+
+      std::vector<float> minTo(W + 1, inf);
+      std::vector<int> prev(W + 1, -1);  // previous worker on alternating path
+      std::vector<bool> inZ(W + 1);     // whether worker is in Z
+      while (job[wCur] != -1) {    // runs at most jCur + 1 times
+        inZ[wCur] = true;
+        const int j = job[wCur];
+        float delta = inf;
+        int wNext;
+        for (int w = 0; w < W; ++w) {
+            if (!inZ[w]) {
+                if (ckmin(minTo[w], mat[j][w] - ys[j] - yt[w]))
+                    prev[w] = wCur;
+                if (ckmin(delta, minTo[w])) 
+                    wNext = w;
+            }
+        }
+        // delta will always be nonnegative,
+        // except possibly during the first time this loop runs
+        // if any entries of C[jCur] are negative
+        for (int w = 0; w <= W; ++w) {
+            if (inZ[w]) {
+                ys[job[w]] += delta;
+                yt[w] -= delta;
+            } else {
+                minTo[w] -= delta;
+            }
+        }
+        wCur = wNext;
+      }
+      // update assignments along alternating path
+      for (int w; wCur != W; wCur = w) 
+          job[wCur] = job[w = prev[wCur]];
+      answers.push_back(-yt[W]);
+    }
+    return answers;
+  }
+
+  void bertsekas_auction() {
+    // for parallelization approximate max bipartite matching
     // problems: we have non-integral bipartite graph.
     // multiplicative auction algo for (1-e)-approximation of max bipartite:
     // one-sided vertex deletion (delete c_prev given corr obstacle left the frame)
