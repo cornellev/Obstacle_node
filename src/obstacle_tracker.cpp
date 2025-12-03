@@ -218,32 +218,34 @@ private:
 
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
     const int J = mat.size(); // cost_matrix.rows();
+    assert(J > 0);
     const int W = mat[0].size(); // cost_matrix.cols();
 
     // Eigen::VectorXf ys(J);
     // Eigen::VectorXf yt(W + 1);
     // Eigen::VectorXf answers;
     std::vector<int> job(W + 1, -1);
-    std::vector<float> ys(J);
-    std::vector<float> yt(W + 1);
+    std::vector<float> ys(J, 0.0f);
+    std::vector<float> yt(W + 1, 0.0f);
     std::vector<float> answers;
-
-    return answers;
-
     const float inf = std::numeric_limits<float>::max();
+
     for (int jCur = 0; jCur < J; ++jCur) {  // assign jCur-th job
       int wCur = W;
       job[wCur] = jCur;
 
       std::vector<float> minTo(W + 1, inf);
       std::vector<int> prev(W + 1, -1);  // previous worker on alternating path
-      std::vector<bool> inZ(W + 1);     // whether worker is in Z
+      std::vector<bool> inZ(W + 1, false);     // whether worker is in Z
       while (job[wCur] != -1) {    // runs at most jCur + 1 times
+        RCLCPP_INFO(this->get_logger(), "in the while\n");
         inZ[wCur] = true;
         const int j = job[wCur];
         float delta = inf;
-        int wNext;
+        int wNext = -1;
+
         for (int w = 0; w < W; ++w) {
+          // RCLCPP_INFO(this->get_logger(), "1st for %d\n", w);
             if (!inZ[w]) {
                 if (ckmin(minTo[w], mat[j][w] - ys[j] - yt[w]))
                     prev[w] = wCur;
@@ -255,20 +257,42 @@ private:
         // except possibly during the first time this loop runs
         // if any entries of C[jCur] are negative
         for (int w = 0; w <= W; ++w) {
+          // RCLCPP_INFO(this->get_logger(), "2nd for %d\n", w);
             if (inZ[w]) {
-                ys[job[w]] += delta;
+                if (job[w] != -1) ys[job[w]] += delta;
                 yt[w] -= delta;
             } else {
                 minTo[w] -= delta;
             }
         }
+
+        if (wNext == -1) break;
         wCur = wNext;
       }
       // update assignments along alternating path
-      for (int w; wCur != W; wCur = w) 
-          job[wCur] = job[w = prev[wCur]];
+      // for (int w; wCur != W; wCur = w) {
+      //   int prevW = prev[wCur];
+      //   if (prevW == -1) break;
+      //   job[wCur] = job[prevW];
+      //   wCur = prevW;
+      // }
+
+      while (wCur != W && wCur != -1) {
+        // RCLCPP_INFO(this->get_logger(), "update assign while\n");
+        int prevW = prev[wCur];
+        if (prevW == -1) break;
+        job[wCur] = job[prevW];
+        wCur = prevW;
+      }
+
+      // RCLCPP_INFO(this->get_logger(), "push answers\n");
       answers.push_back(-yt[W]);
     }
+
+    for (int a = 0; a < answers.size(); ++a) {
+      RCLCPP_INFO(this->get_logger(), "a: %d has answer %f\n", a, answers[a]);
+    }
+
     return answers;
   }
 
