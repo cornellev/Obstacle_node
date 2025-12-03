@@ -121,15 +121,17 @@ private:
     // hungarian algorithm takes in cost (adjacency) matrix where C_CURR is row
     // C_PREV is col
     std::vector<Edge> E;
-    // std::vector<std::vector<float>> C(C_CURR.size(), std::vector<float>(C_PREV.size(), 0.0));
-    Eigen::MatrixXf cost_matrix(C_CURR.size(), C_PREV.size());
+    int max_size = std::max(C_CURR.size(), C_PREV.size());
+    std::vector<std::vector<float>> C(max_size, std::vector<float>(max_size, std::numeric_limits<float>::max()));
+    // Eigen::MatrixXf cost_matrix(C_CURR.size(), C_PREV.size());
 
     // bipartite graph construction:
     // C_PREV (t-1), C_CURR (t): sets of clusters at time t-1 and t, C_PREV \intersect C_CURR = \emptyset
     // E: set of edges with elements (c_prev, c) s.t. c_prev \in C_PREV and c \in C_CURR
     // set cluster_ids of c \in C_CURR to be the bipartite matched cluster_ids of c_prev \in C_PREV:
     // i.e. if (c_prev, c) is a match in max bipartite match, then set cluster_id of c_prev to be cluster_id of c
-    float max_cost = 0.0;
+    if (max_size == 0) return;
+
     for (int i = 0; i < C_CURR.size(); ++i) {
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
@@ -146,21 +148,19 @@ private:
             driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
             auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
 
-            if (result.cost > max_cost) max_cost = result.cost;
-
             // check whether translation between the two clusters are within max_radius (which we can define dynamically by past cluster's velocity)
             Edge edge;
             edge.edge = std::make_tuple(j, i);
             edge.weight = result.cost;
 
             E.push_back(edge);
-            // C[i][j] = result.cost;
-            cost_matrix(i, j) = result.cost;
+            C[i][j] = result.cost;
+            // cost_matrix(i, j) = result.cost;
         }
     }
 
-    // hungarian_assignment(cost_matrix, max_cost);
-    // if (mat.size() <= mat[0].size()) std::vector<float> assignments = hungarian_assignment(C, max_cost);
+    hungarian_assignment(C);
+    // if (mat.size() <= mat[0].size()) std::vector<float> assignments = hungarian_assignment(C);
     RCLCPP_INFO(this->get_logger(), "done");
     obs_msg_prev_ = msg->obstacles;
   }
@@ -189,7 +189,7 @@ private:
   }
 
   // void hungarian_assignment(Eigen::MatrixXf mat, float max_cost)  {
-  std::vector<float> hungarian_assignment(std::vector<std::vector<float>> mat, float max_cost)  {
+  std::vector<float> hungarian_assignment(std::vector<std::vector<float>> mat)  {
     // a way to implement MHT for clusters
 
     // matching on a bipartite graph where red vertices correspond to previous
@@ -227,6 +227,8 @@ private:
     std::vector<float> ys(J);
     std::vector<float> yt(W + 1);
     std::vector<float> answers;
+
+    return answers;
 
     const float inf = std::numeric_limits<float>::max();
     for (int jCur = 0; jCur < J; ++jCur) {  // assign jCur-th job
