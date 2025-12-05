@@ -5,6 +5,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
+#include <pcl/common/centroid.h>
 #include <pcl/common/common.h>
 #include "cev_msgs/msg/obstacles.hpp"
 #include "obstacle/msg/obstacle_array.hpp"
@@ -12,6 +13,7 @@
 #include "icp/geo.h"
 #include "icp/driver.h"
 
+#include <fstream>
 #include <iostream>
 #include <unordered_map>
 #include <vector>
@@ -155,15 +157,140 @@ private:
 
             E.push_back(edge);
             C[i][j] = result.cost;
+            // RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- %f -- C_PREV [%d]\n", i, result.cost, j);
             // cost_matrix(i, j) = result.cost;
         }
     }
 
-    hungarian_assignment(C);
-    // if (mat.size() <= mat[0].size()) std::vector<float> assignments = hungarian_assignment(C);
+    std::vector<int> matchings = hungarian_assignment(C);
+    outputMatching(C_PREV, C_CURR, matchings);
+    // auto markers = outputMatching(C_PREV, C_CURR, matchings);
+
+    // marker_pub_->publish(markers);
+
     RCLCPP_INFO(this->get_logger(), "done");
     obs_msg_prev_ = msg->obstacles;
   }
+
+  visualization_msgs::msg::MarkerArray outputMatching(
+      const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
+      const std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
+      std::vector<int> matchings) {
+      
+      visualization_msgs::msg::MarkerArray marker_array;
+      
+      for (int i = 0; i < matchings.size(); ++i) {
+        RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, matchings[i]);
+      }
+      for (int i = 0; i < matchings.size(); ++i) {
+          int prev_idx = matchings[i];
+          
+          if (prev_idx < 0) {
+              continue;
+          }
+          
+          // Get centroids of matched clusters
+          Eigen::Vector4f centroid_prev, centroid_curr;
+          
+          // Convert to PCL and compute centroids
+          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_prev(new pcl::PointCloud<pcl::PointXYZ>);
+          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
+          
+          pcl::fromROSMsg(C_PREV[prev_idx], *cloud_prev);
+          pcl::fromROSMsg(C_CURR[i], *cloud_curr);
+          
+          pcl::compute3DCentroid(*cloud_prev, centroid_prev);
+          pcl::compute3DCentroid(*cloud_curr, centroid_curr);
+          
+          // Create line marker
+          visualization_msgs::msg::Marker line;
+          line.header.frame_id = C_CURR[i].header.frame_id;
+          // line.header.stamp = rclcpp::Clock().now();
+          line.ns = "cluster_matches";
+          line.id = i;
+          line.type = visualization_msgs::msg::Marker::ARROW;
+          line.action = visualization_msgs::msg::Marker::ADD;
+          
+          // Start point (previous cluster)
+          geometry_msgs::msg::Point p1;
+          p1.x = centroid_prev[0];
+          p1.y = centroid_prev[1];
+          p1.z = centroid_prev[2];
+          
+          // End point (current cluster)
+          geometry_msgs::msg::Point p2;
+          p2.x = centroid_curr[0];
+          p2.y = centroid_curr[1];
+          p2.z = centroid_curr[2];
+          
+          line.points.push_back(p1);
+          line.points.push_back(p2);
+          
+          // Style
+          line.scale.x = 0.05;  // Arrow shaft diameter
+          line.scale.y = 0.1;   // Arrow head diameter
+          line.scale.z = 0.1;   // Arrow head length
+          
+          // Color (green for matched)
+          line.color.r = 0.0;
+          line.color.g = 1.0;
+          line.color.b = 0.0;
+          line.color.a = 0.8;
+          
+          line.lifetime = rclcpp::Duration::from_seconds(0.5);
+          
+          marker_array.markers.push_back(line);
+      }
+      
+      // // Add text labels
+      // for (size_t i = 0; i < matchings.size(); ++i) {
+      //     int prev_idx = matchings[i];
+      //     if (prev_idx == -1) continue;
+          
+      //     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
+      //     pcl::fromROSMsg(C_CURR[i], *cloud_curr);
+          
+      //     Eigen::Vector4f centroid;
+      //     pcl::compute3DCentroid(*cloud_curr, centroid);
+          
+      //     visualization_msgs::msg::Marker text;
+      //     text.header.frame_id = C_CURR[i].header.frame_id;
+      //     text.header.stamp = rclcpp::Clock().now();
+      //     text.ns = "cluster_labels";
+      //     text.id = i + 1000;  // Offset to avoid ID collision
+      //     text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+      //     text.action = visualization_msgs::msg::Marker::ADD;
+          
+      //     text.pose.position.x = centroid[0];
+      //     text.pose.position.y = centroid[1];
+      //     text.pose.position.z = centroid[2] + 0.5;  // Slightly above
+          
+      //     text.text = std::to_string(prev_idx) + "->" + std::to_string(i);
+      //     text.scale.z = 0.3;  // Text height
+          
+      //     text.color.r = 1.0;
+      //     text.color.g = 1.0;
+      //     text.color.b = 1.0;
+      //     text.color.a = 1.0;
+          
+      //     text.lifetime = rclcpp::Duration::from_seconds(0.5);
+          
+      //     marker_array.markers.push_back(text);
+      // }
+      
+      return marker_array;
+  }
+
+  // void sanityCheckHungarian() {
+  //     RCLCPP_INFO(this->get_logger(), "STARTING SANITY CHECK\n");
+  //     std::vector<std::vector<float>> costs{{8.0, 5.0, 9.0}, {4.0, 2.0, 4.0}, {7.0, 3.0, 8.0}};
+  //     //          A   B   C
+  //     // clean   8.0 5.0 9.0
+  //     // sweep   4.0 2.0 4.0
+  //     //  wash   7.0 3.0 8.0
+  //     assert((hungarian_assignment(costs) == std::vector<float>{5.0, 9.0, 15.0}));
+  //     RCLCPP_INFO(this->get_logger(), "Sanity check passed\n");
+  // }
 
   void multi_hypothesis_tracking(std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev, 
                                  std::unordered_map<int32_t, std::vector<PointXYZCluster>> C) {
@@ -184,12 +311,8 @@ private:
     //      -> denote as {Y(T_j, Z_j)}
   }
 
-  constexpr bool ckmin(float& a, const float& b) { 
-      return b < a ? a = b, true : false; 
-  }
-
   // void hungarian_assignment(Eigen::MatrixXf mat, float max_cost)  {
-  std::vector<float> hungarian_assignment(std::vector<std::vector<float>> mat)  {
+  std::vector<int> hungarian_assignment(std::vector<std::vector<float>> mat)  {
     // a way to implement MHT for clusters
 
     // matching on a bipartite graph where red vertices correspond to previous
@@ -205,30 +328,17 @@ private:
     // unique id for clusters so we can do more long term obstacle tracking for
     // the same cluster
 
-    // complexity reduction / pruning: 
-    // there should be a cost_threshold -> don't even create an edge if 
-    // weight < cost_threshold
-    // cost func should consider diff in shape, position, orientation, # points -> ICP
-
-    // make matrix square: unassigned cells have val > max_cost
-    // eventually, if some assignment (c_prev, c) has weight > max_cost, remove that matching
-    // Eigen::Index n = std::max(mat.rows(), mat.cols());
-    // Eigen::MatrixXf cost_matrix = Eigen::MatrixXf::Constant(n, n, max_cost + 1.0);
-    // cost_matrix.block(0, 0, mat.rows(), mat.cols()) = mat;
-
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
-    const int J = mat.size(); // cost_matrix.rows();
+    const int J = mat.size(); // cost_matrix.rows() is C_CURR idx
     assert(J > 0);
-    const int W = mat[0].size(); // cost_matrix.cols();
+    const int W = mat[0].size(); // cost_matrix.cols() is C_PREV idx
 
-    // Eigen::VectorXf ys(J);
-    // Eigen::VectorXf yt(W + 1);
-    // Eigen::VectorXf answers;
     std::vector<int> job(W + 1, -1);
     std::vector<float> ys(J, 0.0f);
     std::vector<float> yt(W + 1, 0.0f);
     std::vector<float> answers;
     const float inf = std::numeric_limits<float>::max();
+    const float eps = static_cast<float>(1e-9);
 
     for (int jCur = 0; jCur < J; ++jCur) {  // assign jCur-th job
       int wCur = W;
@@ -237,27 +347,35 @@ private:
       std::vector<float> minTo(W + 1, inf);
       std::vector<int> prev(W + 1, -1);  // previous worker on alternating path
       std::vector<bool> inZ(W + 1, false);     // whether worker is in Z
+      
       while (job[wCur] != -1) {    // runs at most jCur + 1 times
-        RCLCPP_INFO(this->get_logger(), "in the while\n");
         inZ[wCur] = true;
         const int j = job[wCur];
         float delta = inf;
         int wNext = -1;
 
         for (int w = 0; w < W; ++w) {
-          // RCLCPP_INFO(this->get_logger(), "1st for %d\n", w);
             if (!inZ[w]) {
-                if (ckmin(minTo[w], mat[j][w] - ys[j] - yt[w]))
-                    prev[w] = wCur;
-                if (ckmin(delta, minTo[w])) 
-                    wNext = w;
+              float new_cost = mat[j][w] - ys[j] - yt[w];
+              if (new_cost < minTo[w] - eps) {
+                minTo[w] = new_cost;
+                prev[w] = wCur;
+              }
+              if (minTo[w] < delta - eps) {
+                delta = minTo[w];
+                wNext = w;
+              }
             }
+        }
+
+        if (wNext == -1) {
+            RCLCPP_ERROR(this->get_logger(), "No valid worker found!");
+            break;
         }
         // delta will always be nonnegative,
         // except possibly during the first time this loop runs
         // if any entries of C[jCur] are negative
         for (int w = 0; w <= W; ++w) {
-          // RCLCPP_INFO(this->get_logger(), "2nd for %d\n", w);
             if (inZ[w]) {
                 if (job[w] != -1) ys[job[w]] += delta;
                 yt[w] -= delta;
@@ -265,35 +383,20 @@ private:
                 minTo[w] -= delta;
             }
         }
-
-        if (wNext == -1) break;
         wCur = wNext;
       }
       // update assignments along alternating path
-      // for (int w; wCur != W; wCur = w) {
-      //   int prevW = prev[wCur];
-      //   if (prevW == -1) break;
-      //   job[wCur] = job[prevW];
-      //   wCur = prevW;
-      // }
-
-      while (wCur != W && wCur != -1) {
-        // RCLCPP_INFO(this->get_logger(), "update assign while\n");
-        int prevW = prev[wCur];
-        if (prevW == -1) break;
-        job[wCur] = job[prevW];
-        wCur = prevW;
+      while (wCur != W) {
+          int w = prev[wCur];
+          job[wCur] = job[w];
+          wCur = w;
       }
 
-      // RCLCPP_INFO(this->get_logger(), "push answers\n");
       answers.push_back(-yt[W]);
     }
 
-    for (int a = 0; a < answers.size(); ++a) {
-      RCLCPP_INFO(this->get_logger(), "a: %d has answer %f\n", a, answers[a]);
-    }
-
-    return answers;
+    job.pop_back();
+    return job;
   }
 
   void bertsekas_auction() {
@@ -311,6 +414,7 @@ private:
     // then (null, c)
   }
 
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;
   std::vector<sensor_msgs::msg::PointCloud2> obs_msg_prev_;
   std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev_;
