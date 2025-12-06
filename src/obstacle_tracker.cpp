@@ -42,6 +42,7 @@ public:
   ObstacleTracker()
   : Node("obstacle_tracker")
   {
+    match_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("rslidar_matches", 10);
     // nearest neighbor association method -> MHT
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_clusters", 10,
@@ -119,6 +120,7 @@ private:
     // initialize the bipartite graph
     std::vector<sensor_msgs::msg::PointCloud2> C_PREV = obs_msg_prev_;
     std::vector<sensor_msgs::msg::PointCloud2> C_CURR = msg->obstacles;
+
     // or maybe a mapping from (c_prev, c) -> edge weight, we'll see
     // hungarian algorithm takes in cost (adjacency) matrix where C_CURR is row
     // C_PREV is col
@@ -136,6 +138,8 @@ private:
 
     for (int i = 0; i < C_CURR.size(); ++i) {
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
+        if (c.width * c.height == 0) continue;
+
         icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
 
         for (int j = 0; j < C_PREV.size(); ++j)
@@ -163,122 +167,85 @@ private:
     }
 
     std::vector<int> matchings = hungarian_assignment(C);
-    outputMatching(C_PREV, C_CURR, matchings);
     // auto markers = outputMatching(C_PREV, C_CURR, matchings);
+    outputMatching(C_PREV, C_CURR, matchings);
 
-    // marker_pub_->publish(markers);
+    // match_pub_->publish(markers);
 
     RCLCPP_INFO(this->get_logger(), "done");
     obs_msg_prev_ = msg->obstacles;
   }
 
-  visualization_msgs::msg::MarkerArray outputMatching(
+  // visualization_msgs::msg::MarkerArray 
+  void outputMatching(
       const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
       const std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
       std::vector<int> matchings) {
       
       visualization_msgs::msg::MarkerArray marker_array;
       
-      for (int i = 0; i < matchings.size(); ++i) {
-        RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, matchings[i]);
-      }
-      for (int i = 0; i < matchings.size(); ++i) {
-          int prev_idx = matchings[i];
-          
-          if (prev_idx < 0) {
-              continue;
-          }
-          
-          // Get centroids of matched clusters
-          Eigen::Vector4f centroid_prev, centroid_curr;
-          
-          // Convert to PCL and compute centroids
-          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_prev(new pcl::PointCloud<pcl::PointXYZ>);
-          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
-          
-          pcl::fromROSMsg(C_PREV[prev_idx], *cloud_prev);
-          pcl::fromROSMsg(C_CURR[i], *cloud_curr);
-          
-          pcl::compute3DCentroid(*cloud_prev, centroid_prev);
-          pcl::compute3DCentroid(*cloud_curr, centroid_curr);
-          
-          // Create line marker
-          visualization_msgs::msg::Marker line;
-          line.header.frame_id = C_CURR[i].header.frame_id;
-          // line.header.stamp = rclcpp::Clock().now();
-          line.ns = "cluster_matches";
-          line.id = i;
-          line.type = visualization_msgs::msg::Marker::ARROW;
-          line.action = visualization_msgs::msg::Marker::ADD;
-          
-          // Start point (previous cluster)
-          geometry_msgs::msg::Point p1;
-          p1.x = centroid_prev[0];
-          p1.y = centroid_prev[1];
-          p1.z = centroid_prev[2];
-          
-          // End point (current cluster)
-          geometry_msgs::msg::Point p2;
-          p2.x = centroid_curr[0];
-          p2.y = centroid_curr[1];
-          p2.z = centroid_curr[2];
-          
-          line.points.push_back(p1);
-          line.points.push_back(p2);
-          
-          // Style
-          line.scale.x = 0.05;  // Arrow shaft diameter
-          line.scale.y = 0.1;   // Arrow head diameter
-          line.scale.z = 0.1;   // Arrow head length
-          
-          // Color (green for matched)
-          line.color.r = 0.0;
-          line.color.g = 1.0;
-          line.color.b = 0.0;
-          line.color.a = 0.8;
-          
-          line.lifetime = rclcpp::Duration::from_seconds(0.5);
-          
-          marker_array.markers.push_back(line);
-      }
-      
-      // // Add text labels
-      // for (size_t i = 0; i < matchings.size(); ++i) {
+      // RCLCPP_INFO(this->get_logger(), "matchings length %d", matchings.size());
+      // for (int i = 0; i < matchings.size(); ++i) {
+      //     RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, matchings[i]);
+
       //     int prev_idx = matchings[i];
-      //     if (prev_idx == -1) continue;
           
+      //     if (prev_idx < 0) {
+      //         continue;
+      //     }
+          
+      //     Eigen::Vector4f centroid_prev, centroid_curr;
+          
+      //     // Convert to PCL and compute centroids
+      //     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_prev(new pcl::PointCloud<pcl::PointXYZ>);
       //     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
+          
+      //     pcl::fromROSMsg(C_PREV[prev_idx], *cloud_prev);
       //     pcl::fromROSMsg(C_CURR[i], *cloud_curr);
           
-      //     Eigen::Vector4f centroid;
-      //     pcl::compute3DCentroid(*cloud_curr, centroid);
+      //     pcl::compute3DCentroid(*cloud_prev, centroid_prev);
+      //     pcl::compute3DCentroid(*cloud_curr, centroid_curr);
           
-      //     visualization_msgs::msg::Marker text;
-      //     text.header.frame_id = C_CURR[i].header.frame_id;
-      //     text.header.stamp = rclcpp::Clock().now();
-      //     text.ns = "cluster_labels";
-      //     text.id = i + 1000;  // Offset to avoid ID collision
-      //     text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
-      //     text.action = visualization_msgs::msg::Marker::ADD;
+      //     // Create line marker
+      //     // visualization_msgs::msg::Marker line;
+      //     // line.header.frame_id = C_CURR[i].header.frame_id;
+      //     // line.ns = "cluster_matches";
+      //     // line.id = i;
+      //     // line.type = visualization_msgs::msg::Marker::ARROW;
+      //     // line.action = visualization_msgs::msg::Marker::ADD;
           
-      //     text.pose.position.x = centroid[0];
-      //     text.pose.position.y = centroid[1];
-      //     text.pose.position.z = centroid[2] + 0.5;  // Slightly above
+      //     // // Start point (previous cluster)
+      //     // geometry_msgs::msg::Point p1;
+      //     // p1.x = centroid_prev[0];
+      //     // p1.y = centroid_prev[1];
+      //     // p1.z = centroid_prev[2];
           
-      //     text.text = std::to_string(prev_idx) + "->" + std::to_string(i);
-      //     text.scale.z = 0.3;  // Text height
+      //     // // End point (current cluster)
+      //     // geometry_msgs::msg::Point p2;
+      //     // p2.x = centroid_curr[0];
+      //     // p2.y = centroid_curr[1];
+      //     // p2.z = centroid_curr[2];
           
-      //     text.color.r = 1.0;
-      //     text.color.g = 1.0;
-      //     text.color.b = 1.0;
-      //     text.color.a = 1.0;
+      //     // line.points.push_back(p1);
+      //     // line.points.push_back(p2);
           
-      //     text.lifetime = rclcpp::Duration::from_seconds(0.5);
+      //     // // Style
+      //     // line.scale.x = 0.05;
+      //     // line.scale.y = 0.1;
+      //     // line.scale.z = 0.1;
           
-      //     marker_array.markers.push_back(text);
+      //     // Color (green for matched)
+      //     // line.color.r = 0.0;
+      //     // line.color.g = 1.0;
+      //     // line.color.b = 0.0;
+      //     // line.color.a = 0.8;
+          
+      //     // line.lifetime = rclcpp::Duration::from_seconds(0.5);
+          
+      //     // marker_array.markers.push_back(line);
       // }
       
-      return marker_array;
+      // return marker_array;
   }
 
   // void sanityCheckHungarian() {
@@ -395,6 +362,10 @@ private:
       answers.push_back(-yt[W]);
     }
 
+    for (int i = 0; i < job.size(); ++i) {
+      RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, job[i]);
+    }
+
     job.pop_back();
     return job;
   }
@@ -414,7 +385,7 @@ private:
     // then (null, c)
   }
 
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr match_pub_;
   sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;
   std::vector<sensor_msgs::msg::PointCloud2> obs_msg_prev_;
   std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev_;
