@@ -43,16 +43,19 @@ public:
   : Node("obstacle_tracker")
   {
     match_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("rslidar_matches", 10);
+    prev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/prev", 10);
+    curr_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/curr", 10);
     // nearest neighbor association method -> MHT
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_clusters", 10,
       std::bind(&ObstacleTracker::pcCallback, this, std::placeholders::_1));
 
     obs_sub_ = this->create_subscription<cev_msgs::msg::Obstacles>(
-        "/rslidar_obstacles", 10,
-        std::bind(&ObstacleTracker::obsCallback, this, std::placeholders::_1));
+      "/rslidar_obstacles", 10,
+      std::bind(&ObstacleTracker::obsCallback, this, std::placeholders::_1));
 
     // maybe implement joint probability data association (JPDA) also for clustering
+
 
     RCLCPP_INFO(this->get_logger(), "ObstacleTracker started - waiting for PointCloud2 on 'input_points'");
   }
@@ -96,6 +99,10 @@ private:
     // after all the cluster matching and whatever is done, update C_prev
     // we can also use this to determine static v. dynamic obstacles
 
+    if (C_prev_.size() * C.size() != 0) {
+      prev_pub_->publish(*msg_prev_);
+      curr_pub_->publish(*msg);
+    }
     msg_prev_ = msg;
     C_prev_ = C;
   }
@@ -136,116 +143,173 @@ private:
     // i.e. if (c_prev, c) is a match in max bipartite match, then set cluster_id of c_prev to be cluster_id of c
     if (max_size == 0) return;
 
+    auto start = std::chrono::high_resolution_clock::now();
+    // std::vector<std::future<void>> futures;
+
+    // for (int i = 0; i < C_CURR.size(); ++i) {
+    //     sensor_msgs::msg::PointCloud2 c = C_CURR[i];
+    //     if (c.width * c.height == 0) continue;
+
+    //     auto start = std::chrono::high_resolution_clock::now();
+    //     icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
+
+    //     for (int j = 0; j < C_PREV.size(); ++j)
+    //     {
+    //         sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
+    //         icp::PointCloud<icp::ThreeD> icp_c_prev = pc_to_icp_pc(c_prev);
+
+    //         std::unique_ptr<icp::ICP3> icp = icp::ICP3::from_method("vanilla", icp::Config()).value();
+    //         icp::ICPDriver driver(std::move(icp));
+
+    //         driver.set_max_iterations(1);
+    //         driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
+    //         auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
+
+    //         // check whether translation between the two clusters are within max_radius (which we can define dynamically by past cluster's velocity)
+    //         Edge edge;
+    //         edge.edge = std::make_tuple(j, i);
+    //         edge.weight = result.cost;
+
+    //         E.push_back(edge);
+    //         C[i][j] = result.cost;
+    //         // cost_matrix(i, j) = result.cost;
+    //     }
+    // }
+
+    // for (auto &f : futures) f.get();
+
+    std::mutex mtx;
+    std::vector<std::future<void>> futures;
+
     for (int i = 0; i < C_CURR.size(); ++i) {
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         if (c.width * c.height == 0) continue;
-
+        
         icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
+        
+        for (int j = 0; j < C_PREV.size(); ++j) {
+            futures.push_back(std::async(std::launch::async, [&, i, j, icp_c]() {
+                sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
 
-        for (int j = 0; j < C_PREV.size(); ++j)
-        {
-            sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
-            icp::PointCloud<icp::ThreeD> icp_c_prev = pc_to_icp_pc(c_prev);
+                if (c_prev.width * c_prev.height == 0) return;
+                icp::PointCloud<icp::ThreeD> icp_c_prev = pc_to_icp_pc(c_prev);
+                
+                std::unique_ptr<icp::ICP3> icp = icp::ICP3::from_method("vanilla", icp::Config()).value();
+                icp::ICPDriver driver(std::move(icp));
 
-            std::unique_ptr<icp::ICP3> icp = icp::ICP3::from_method("vanilla", icp::Config()).value();
-            icp::ICPDriver driver(std::move(icp));
-
-            driver.set_max_iterations(1);
-            driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
-            auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
-
-            // check whether translation between the two clusters are within max_radius (which we can define dynamically by past cluster's velocity)
-            Edge edge;
-            edge.edge = std::make_tuple(j, i);
-            edge.weight = result.cost;
-
-            E.push_back(edge);
-            C[i][j] = result.cost;
-            // RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- %f -- C_PREV [%d]\n", i, result.cost, j);
-            // cost_matrix(i, j) = result.cost;
+                driver.set_max_iterations(1);
+                driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
+                
+                auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
+                
+                Edge edge;
+                edge.edge = std::make_tuple(j, i);
+                edge.weight = result.cost;
+                
+                // Need mutex protection for shared data structures
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    E.push_back(edge);
+                    C[i][j] = result.cost;
+                }
+            }));
         }
     }
 
-    std::vector<int> matchings = hungarian_assignment(C);
-    // auto markers = outputMatching(C_PREV, C_CURR, matchings);
-    outputMatching(C_PREV, C_CURR, matchings);
+    // Wait for all tasks to complete
+    for (auto& f : futures) {
+        f.get();
+    }
 
-    // match_pub_->publish(markers);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
+
+    std::vector<int> matchings = hungarian_assignment(C);
+    auto markers = outputMatching(C_PREV, C_CURR, matchings);
+    // outputMatching(C_PREV, C_CURR, matchings);
+
+    match_pub_->publish(markers);
 
     RCLCPP_INFO(this->get_logger(), "done");
     obs_msg_prev_ = msg->obstacles;
   }
 
-  // visualization_msgs::msg::MarkerArray 
-  void outputMatching(
+  visualization_msgs::msg::MarkerArray outputMatching(
       const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
       const std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
       std::vector<int> matchings) {
       
       visualization_msgs::msg::MarkerArray marker_array;
       
-      // RCLCPP_INFO(this->get_logger(), "matchings length %d", matchings.size());
-      // for (int i = 0; i < matchings.size(); ++i) {
-      //     RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, matchings[i]);
+      RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_PREV.size(), C_CURR.size());
+      for (int i = 0; i < matchings.size(); ++i) {
+          int prev_idx = i;
+          int curr_idx = matchings[i];
+          
+          // if prev_idx or curr_idx is -1, then this is an invalid match
+          if (curr_idx == -1 || curr_idx >= C_CURR.size() || prev_idx == -1 || prev_idx >= C_PREV.size()) {
+              continue;
+          }
 
-      //     int prev_idx = matchings[i];
+          RCLCPP_INFO(this->get_logger(), "C_PREV [%d] -- C_CURR [%d]\n", prev_idx, curr_idx);
           
-      //     if (prev_idx < 0) {
-      //         continue;
-      //     }
+          Eigen::Vector4f centroid_prev, centroid_curr;
           
-      //     Eigen::Vector4f centroid_prev, centroid_curr;
+          // Convert to PCL and compute centroids
+          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_prev(new pcl::PointCloud<pcl::PointXYZ>);
+          pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
           
-      //     // Convert to PCL and compute centroids
-      //     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_prev(new pcl::PointCloud<pcl::PointXYZ>);
-      //     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_curr(new pcl::PointCloud<pcl::PointXYZ>);
+          pcl::fromROSMsg(C_PREV[prev_idx], *cloud_prev);
+          pcl::fromROSMsg(C_CURR[curr_idx], *cloud_curr);
           
-      //     pcl::fromROSMsg(C_PREV[prev_idx], *cloud_prev);
-      //     pcl::fromROSMsg(C_CURR[i], *cloud_curr);
+          pcl::compute3DCentroid(*cloud_prev, centroid_prev);
+          pcl::compute3DCentroid(*cloud_curr, centroid_curr);
+
+          RCLCPP_INFO(this->get_logger(), "C_PREV: (%f, %f, %f) -- C_CURR: (%f, %f, %f)\n",
+          centroid_prev[0], centroid_prev[1], centroid_prev[2], centroid_curr[0], centroid_curr[1], centroid_curr[2]);
           
-      //     pcl::compute3DCentroid(*cloud_prev, centroid_prev);
-      //     pcl::compute3DCentroid(*cloud_curr, centroid_curr);
+          // Create line marker
+          visualization_msgs::msg::Marker line;
+          line.header.frame_id = "rslidar";
+          line.header.stamp = this->now();
+          line.ns = "cluster_matches";
+          line.id = i;
+          line.type = visualization_msgs::msg::Marker::ARROW;
+          line.action = visualization_msgs::msg::Marker::ADD;
           
-      //     // Create line marker
-      //     // visualization_msgs::msg::Marker line;
-      //     // line.header.frame_id = C_CURR[i].header.frame_id;
-      //     // line.ns = "cluster_matches";
-      //     // line.id = i;
-      //     // line.type = visualization_msgs::msg::Marker::ARROW;
-      //     // line.action = visualization_msgs::msg::Marker::ADD;
+          // Start point (previous cluster)
+          geometry_msgs::msg::Point p1;
+          p1.x = centroid_prev[0];
+          p1.y = centroid_prev[1];
+          p1.z = centroid_prev[2];
           
-      //     // // Start point (previous cluster)
-      //     // geometry_msgs::msg::Point p1;
-      //     // p1.x = centroid_prev[0];
-      //     // p1.y = centroid_prev[1];
-      //     // p1.z = centroid_prev[2];
+          // End point (current cluster)
+          geometry_msgs::msg::Point p2;
+          p2.x = centroid_curr[0];
+          p2.y = centroid_curr[1];
+          p2.z = centroid_curr[2];
           
-      //     // // End point (current cluster)
-      //     // geometry_msgs::msg::Point p2;
-      //     // p2.x = centroid_curr[0];
-      //     // p2.y = centroid_curr[1];
-      //     // p2.z = centroid_curr[2];
+          line.points.push_back(p1);
+          line.points.push_back(p2);
           
-      //     // line.points.push_back(p1);
-      //     // line.points.push_back(p2);
+          // Style
+          line.scale.x = 0.05;
+          line.scale.y = 0.1;
+          line.scale.z = 0.1;
           
-      //     // // Style
-      //     // line.scale.x = 0.05;
-      //     // line.scale.y = 0.1;
-      //     // line.scale.z = 0.1;
+          // Color (green for matched)
+          line.color.r = 0.0;
+          line.color.g = 1.0;
+          line.color.b = 0.0;
+          line.color.a = 0.8;
           
-      //     // Color (green for matched)
-      //     // line.color.r = 0.0;
-      //     // line.color.g = 1.0;
-      //     // line.color.b = 0.0;
-      //     // line.color.a = 0.8;
+          line.lifetime = rclcpp::Duration::from_seconds(2.0);
           
-      //     // line.lifetime = rclcpp::Duration::from_seconds(0.5);
-          
-      //     // marker_array.markers.push_back(line);
-      // }
+          marker_array.markers.push_back(line);
+      }
       
-      // return marker_array;
+      return marker_array;
   }
 
   // void sanityCheckHungarian() {
@@ -280,20 +344,7 @@ private:
 
   // void hungarian_assignment(Eigen::MatrixXf mat, float max_cost)  {
   std::vector<int> hungarian_assignment(std::vector<std::vector<float>> mat)  {
-    // a way to implement MHT for clusters
-
-    // matching on a bipartite graph where red vertices correspond to previous
-    // clusters at timestamp t-1 and black vertices correspond to current
-    // clusters at timestamp t
-    // we construct a fully connected (WLOG, each red vertex connected to all 
-    // black vertices) bipartite graph where the weight of edge connecting each
-    // red-black vertex pair is defined by the quantitative ICP overlaying cost
-    // thing between the two clusters (maybe like determined by the returned
-    // transformation matrix [R | t])
-    // somehow think about this?
-    // unmatched black (t) vertices are maybe categorized as new obstacles?
-    // unique id for clusters so we can do more long term obstacle tracking for
-    // the same cluster
+    // i is the cluster id of C_PREV, job[i] is the cluster id of C_CURR
 
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
     const int J = mat.size(); // cost_matrix.rows() is C_CURR idx
@@ -362,10 +413,6 @@ private:
       answers.push_back(-yt[W]);
     }
 
-    for (int i = 0; i < job.size(); ++i) {
-      RCLCPP_INFO(this->get_logger(), "C_CURR [%d] -- C_PREV [%d]\n", i, job[i]);
-    }
-
     job.pop_back();
     return job;
   }
@@ -385,6 +432,8 @@ private:
     // then (null, c)
   }
 
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr prev_pub_;
+  rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr curr_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr match_pub_;
   sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;
   std::vector<sensor_msgs::msg::PointCloud2> obs_msg_prev_;
