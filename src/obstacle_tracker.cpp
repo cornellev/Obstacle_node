@@ -37,6 +37,20 @@ struct Edge {
     float weight;
 };
 
+struct Box {
+  float cx, cy;
+  float vx, vy;
+  float length, width;
+  float yaw, yaw_rate;
+  int cid;
+};
+
+struct Transform {
+  std::tuple<float, float> vel;
+  float yaw_rate;
+};
+
+
 class ObstacleTracker : public rclcpp::Node {
 public:
   ObstacleTracker()
@@ -60,6 +74,12 @@ public:
 
 private:
   void pcCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+    // rclcpp::Time curr_stamp(msg->header.stamp);
+    // rclcpp::Time prev_stamp(msg_prev_->header.stamp);
+
+    // rclcpp::Duration dt_sec = curr_stamp - prev_stamp;
+    // dt = dt_sec.seconds();
+
     // check required fields
     bool has_x=false, has_y=false, has_z=false, has_id=false;
     for (const auto &f : msg->fields) {
@@ -122,18 +142,27 @@ private:
     return eigen_c;
   }
 
-  struct Box {
-      float cx, cy;
-      float length, width;
-      float yaw;  // radians
-  };
-
   inline float wrapAngle(float angle) {
       while (angle > M_PI) angle -= 2.0f * M_PI;
       while (angle < -M_PI) angle += 2.0f * M_PI;
       return angle;
   }
 
+  std::tuple<float, float> computeVelocity(const Box& a, const Box& b) {
+    float dx = a.cx - b.cx;
+    float dy = a.cy - b.cy;
+
+    return std::make_tuple(dx/0.1f, dy/0.1f);
+  }
+
+  float computeYawRate(const Box& a, const Box& b) {
+    float d = a.yaw - b.yaw;
+    while (d > M_PI) d -= 2.0 * M_PI;
+    while (d < -M_PI) d += 2.0 * M_PI;
+    return d / 0.1f;
+  }
+
+  // some version of iou, which is sometimes bad. 
   float boxLoss(const Box& a, const Box& b) {
     // Tunable normalization constants
     const float d_max = 10.0f;   // meters
@@ -161,6 +190,15 @@ private:
     return w_d * D_pos + w_s * D_size + w_y * D_yaw;
   }
 
+  Box predictBox(const Box& prev, Transform transform) {
+      Box pred = prev;
+      float dt = 0.5f;
+      pred.cx += std::get<0>(transform.vel) * dt;
+      pred.cy += std::get<1>(transform.vel) * dt;
+      pred.yaw += transform.yaw_rate * dt;
+      return pred;
+  }
+
   void obsCallback(const cev_msgs::msg::Obstacles::SharedPtr msg) {
     // initialize the bipartite graph
     std::vector<sensor_msgs::msg::PointCloud2> C_PREV = obs_msg_prev_;
@@ -174,7 +212,11 @@ private:
     std::vector<Edge> E;
     int max_size = std::max(C_CURR.size(), C_PREV.size());
     std::vector<std::vector<float>> C(max_size, std::vector<float>(max_size, std::numeric_limits<float>::max()));
-    // Eigen::MatrixXf cost_matrix(C_CURR.size(), C_PREV.size());
+    std::vector<std::vector<Transform>> T(
+        max_size,
+        std::vector<Transform>(max_size, Transform{std::make_tuple(0.0f, 0.0f), 0.0f})
+    );
+
 
     // bipartite graph construction:
     // C_PREV (t-1), C_CURR (t): sets of clusters at time t-1 and t, C_PREV \intersect C_CURR = \emptyset
@@ -188,10 +230,11 @@ private:
     std::vector<std::future<void>> futures;
 
     for (int i = 0; i < C_CURR.size(); ++i) {
+        int j = 0;
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         if (c.width * c.height == 0) continue;
         
-        icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
+        // icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
 
         std::vector<cv::Point2f> cv_points_curr;
         cv_points_curr.reserve(c.width * c.height);
@@ -205,16 +248,9 @@ private:
         }
         cv::RotatedRect rect = cv::minAreaRect(cv_points_curr);
 
-        Box box_curr;
-        box_curr.cx = rect.center.x;
-        box_curr.cy = rect.center.y;
-        box_curr.width = rect.size.width;
-        box_curr.length = rect.size.height;
-        float angle_curr = rect.angle;
-        box_curr.yaw = angle_curr * M_PI / 180.0f;
-        
-        for (int j = 0; j < C_PREV.size(); ++j) {
+        Box box_curr{rect.center.x, rect.center.y, 0.0f, 0.0f, rect.size.width, rect.size.height, rect.angle * M_PI / 180.0f, 0.0f, getClusterId(C_CURR[i])};
 
+        for (int j = 0; j < C_PREV.size(); ++j) {
           sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
 
           std::vector<cv::Point2f> cv_points_prev;
@@ -229,13 +265,15 @@ private:
           }
           cv::RotatedRect rect = cv::minAreaRect(cv_points_prev);
 
-          Box box_prev;
-          box_prev.cx = rect.center.x;
-          box_prev.cy = rect.center.y;
-          box_prev.width = rect.size.width;
-          box_prev.length = rect.size.height;
-          float angle_prev = rect.angle;
-          box_prev.yaw = angle_prev * M_PI / 180.0f;
+          // instead of the actual previous box, we use the predicted new orientation and shape of the box given
+          // past information from the same cluster_id over time, and use that prediction for the loss computation
+          // vs. current boxes
+          // could probably also use this to maybe merge clusters: if satisfying the cases that these clusters
+          // are within the predicted new box, not in the vicinity of any other previous matched clusters.
+          Box box_prev{rect.center.x, rect.center.y, 0.0f, 0.0f, rect.size.width, rect.size.height, rect.angle * M_PI / 180.0f, 0.0f, getClusterId(c_prev)};
+          if (transform.count(getClusterId(c_prev)) > 0) {
+            box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
+          }
 
           Edge edge;
           edge.edge = std::make_tuple(j, i);
@@ -244,53 +282,56 @@ private:
 
           E.push_back(edge);
           C[i][j] = edge.weight;
-
-            // futures.push_back(std::async(std::launch::async, [&, i, j, icp_c]() {
-            //     sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
-
-            //     if (c_prev.width * c_prev.height == 0) return;
-            //     icp::PointCloud<icp::ThreeD> icp_c_prev = pc_to_icp_pc(c_prev);
-                
-            //     std::unique_ptr<icp::ICP3> icp = icp::ICP3::from_method("vanilla", icp::Config()).value();
-            //     icp::ICPDriver driver(std::move(icp));
-
-            //     driver.set_max_iterations(1);
-            //     driver.set_transform_tolerance(0.1 * M_PI / 180, 0.1);
-                
-            //     auto result = driver.converge(icp_c_prev, icp_c, icp::RBTransform3::Identity());
-                
-            //     Edge edge;
-            //     edge.edge = std::make_tuple(j, i);
-            //     edge.weight = result.cost;
-                
-            //     // Need mutex protection for shared data structures
-            //     {
-            //         std::lock_guard<std::mutex> lock(mtx);
-            //         E.push_back(edge);
-            //         C[i][j] = result.cost;
-            //     }
-            // }));
+          T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
         }
     }
-
-    // Wait for all tasks to complete
-    // for (auto& f : futures) {
-    //     f.get();
-    // }
 
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
 
     std::vector<int> matchings = hungarian_assignment(C);
+
+    std::vector<uint8_t> inactive_ids{}; 
+
+    for (int i = 0; i < matchings.size(); ++i) {
+      // prev_idx may not be the previous cluster's cluster_id
+      int prev_idx = i;
+      int curr_idx = matchings[i];
+
+      if (curr_idx != -1 && curr_idx < C_CURR.size() && prev_idx != -1 && prev_idx < C_PREV.size()) {
+        // this is a valid matching
+        if (prev_idx > max_active_id) {
+          max_active_id = prev_idx;
+        }
+      }
+
+      if ((curr_idx == -1 || curr_idx >= C_CURR.size()) && prev_idx != -1 && prev_idx < C_PREV.size()) {
+        uint8_t cid = getClusterId(C_PREV[prev_idx]);
+        // if c_prev is not matched to some c_curr:
+        // then c_prev --- invalid c_curr
+        // add prev_idx to inactive ids, s.t. we can reuse this id if necessary
+        inactive_ids.push_back(cid);
+      }
+    }
+
     // auto markers = outputMatching(C_PREV, C_CURR, matchings);
-    writeClusterIds(C_PREV, C_CURR, matchings);
+    writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T);
 
     // given cluster_id of past C_PREV, output C_CURR s.t. the cluster_id is consistent 
     obstacles_msg.obstacles = C_CURR;
     match_pub_->publish(obstacles_msg);
 
     RCLCPP_INFO(this->get_logger(), "done");
+
+    // instead of saving C_CURR, we make a prediction as to where the next matched cluster will be
+    // and save that predicition as obs_msg_prev_.
+
+    // naive bayes filter for prediction:
+    // via markov assumption, we only need xt-1 for xt
+    // i should define a global parameter that maps
+    // cluster_id : prev pc, prev box, prev state (xt-1)
+  // compute velocity via dx/dt
     obs_msg_prev_ = C_CURR;
   }
 
@@ -309,7 +350,8 @@ private:
   void writeClusterIds(
       const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
       std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
-      std::vector<int> matchings) {
+      std::vector<int> matchings, std::vector<uint8_t> inactive_ids,
+      std::vector<std::vector<Transform>> T) {
 
       sensor_msgs::msg::PointCloud2 bev_points;
       bev_points.header.frame_id = "rslidar";
@@ -332,17 +374,34 @@ private:
       sensor_msgs::PointCloud2Iterator<uint8_t> out_b(bev_points, "b");
 
       RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_PREV.size(), C_CURR.size());
+
       for (int i = 0; i < matchings.size(); ++i) {
           int prev_idx = i;
           int curr_idx = matchings[i];
-          
-          // if prev_idx or curr_idx is -1, then this is an invalid match
-          if (curr_idx == -1 || curr_idx >= C_CURR.size() || prev_idx == -1 || prev_idx >= C_PREV.size()) {
-              continue;
+
+          if (curr_idx == -1 || curr_idx >= C_CURR.size()) {
+            // if c_prev --- invalid c_curr: then this c_prev is just not matched to anything: skip
+            continue;
           }
 
-          // after setting cluster_id, check the new cluster_id of c_curr
-          uint32_t cluster_id = getClusterId(C_PREV[prev_idx]);
+          // == LOGIC FOR SETTING CLUSTER_ID ==
+          uint32_t cluster_id;
+          if (prev_idx == -1 || prev_idx >= C_PREV.size()) {
+            // if c_curr --- invalid c_prev: then this c_curr is not matched to anything: assign new unique cluster_id
+            // this new unique cluster_id is either an inactive id in inactive_ids, or max_active_id 
+            if (!inactive_ids.empty()) {
+              cluster_id = inactive_ids.back();
+              inactive_ids.pop_back();
+              RCLCPP_INFO(this->get_logger(), "Inactive_ids: %d\n", inactive_ids.size());
+            } else {
+              cluster_id = max_active_id;
+              max_active_id++;
+            }
+          } else {
+            cluster_id = getClusterId(C_PREV[prev_idx]);
+            transform[cluster_id] = T[curr_idx][prev_idx];
+          }
+
           setClusterId(C_CURR[curr_idx], cluster_id);
 
           std::vector<cv::Point2f> cv_points;
@@ -481,6 +540,10 @@ private:
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr bev_pub_;
+  int max_active_id = 0;
+  // maps cluster_id to a state change
+  std::map<uint8_t, Transform> transform;
+  // float dt;
 };
 
 int main(int argc, char ** argv) {

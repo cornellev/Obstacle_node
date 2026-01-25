@@ -124,19 +124,9 @@ private:
 
       if (!kept.empty()) {
         filtered_clusters[cid] = kept;
-        // RCLCPP_INFO(this->get_logger(),
-        //             "Cluster %d kept: %zu points (orig %zu, z_range=[%.2f, %.2f])",
-        //             cid, kept.size(), pts.size(), z_min, z_max);
       } 
-      // else {
-      //   RCLCPP_INFO(this->get_logger(),
-      //               "Cluster %d discarded (all points outside z range [%.2f, %.2f], orig z_range=[%.2f, %.2f])",
-      //               cid, z_min_allowed, z_max_allowed, z_min, z_max);
-      // }
     }
 
-    // RCLCPP_INFO(this->get_logger(),
-    //             "After filtering: %zu clusters remain", filtered_clusters.size());
 
     // === BEV projection + OBB ===
     ObstacleArray out;
@@ -194,7 +184,6 @@ private:
         ob.z_min  = z_min;
         ob.z_max  = z_max;
 
-    // if height <0.1m then not blocking
         ob.blocking = (z_max - z_min > 0.1);
 
         out.obstacles.push_back(ob);
