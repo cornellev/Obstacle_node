@@ -13,6 +13,7 @@
 #include <vector>
 #include <cstdint>
 #include <opencv2/opencv.hpp>
+#include <open3d/Open3D.h>
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -115,11 +116,12 @@ private:
       float z_max = std::numeric_limits<float>::lowest();
 
       for (const auto &p : pts) {
-        z_min = std::min(z_min, p.z);
-        z_max = std::max(z_max, p.z);
-        if (p.z >= z_min_allowed && p.z <= z_max_allowed) {
-          kept.push_back(p);
-        }
+        // z_min = std::min(z_min, p.z);
+        // z_max = std::max(z_max, p.z);
+        // if (p.z >= z_min_allowed && p.z <= z_max_allowed) {
+        //   kept.push_back(p);
+        // }
+        kept.push_back(p);
       }
 
       if (!kept.empty()) {
@@ -131,6 +133,7 @@ private:
     // === BEV projection + OBB ===
     ObstacleArray out;
     out.header = msg->header;
+    visualization_msgs::msg::MarkerArray obb_markers;
 
     for (const auto &kv : filtered_clusters) {
         int cid = kv.first;
@@ -144,13 +147,60 @@ private:
         }
 
         std::vector<cv::Point2f> cv_points;
+        auto cloud = std::make_shared<open3d::geometry::PointCloud>();
+
         cv_points.reserve(pts.size());
         float z_min = std::numeric_limits<float>::max();
         float z_max = std::numeric_limits<float>::lowest();
         for (const auto &p : pts) {
             cv_points.emplace_back(p.x, p.y);
+            cloud->points_.push_back(Eigen::Vector3d(p.x, p.y, p.z));
             z_min = std::min(z_min, p.z);
             z_max = std::max(z_max, p.z);
+        }
+
+        if (cloud && cloud->points_.size() > 3) {
+            cloud->RemoveNonFinitePoints();
+            if (cloud->points_.size() > 3) {
+                RCLCPP_INFO(this->get_logger(), "cloud size %d", cloud->points_.size());
+                auto obb = cloud->GetOrientedBoundingBox();
+                Eigen::Vector3d center = obb.center_;
+                Eigen::Matrix3d R = obb.R_;
+                Eigen::Quaterniond q(R);
+                q.normalize();
+                Eigen::Vector3d extent = obb.extent_;
+
+                visualization_msgs::msg::Marker m;
+                m.header = msg->header;
+                m.header.frame_id = "rslidar";
+                m.ns = "obstacle";
+                m.id = cid;
+                m.type = visualization_msgs::msg::Marker::CUBE;
+                m.action = visualization_msgs::msg::Marker::ADD;
+
+                // centroid
+                m.pose.position.x = center.x();
+                m.pose.position.y = center.y();
+                m.pose.position.z = center.z();
+                m.pose.orientation.x = q.x();
+                m.pose.orientation.y = q.y();
+                m.pose.orientation.z = q.z();
+                m.pose.orientation.w = q.w();
+
+                // size
+                m.scale.x = extent.y();
+                m.scale.y = extent.x();
+                m.scale.z = extent.z();
+
+                // m.scale.x = extent.x();
+                // m.scale.y = extent.z();
+                // m.scale.z = extent.y();
+
+                // xyz xzy yxz yzx zyx zxy
+                m.color = getColorFromId(m.id);
+
+                obb_markers.markers.push_back(m);
+            }
         }
 
         cv::RotatedRect rect = cv::minAreaRect(cv_points);
@@ -193,42 +243,44 @@ private:
         //             cid, cx, cy, length, width, yaw);
     }
 
+    marker_pub_->publish(obb_markers);
+
     // === publish ObstacleArray ===
     obs_pub_->publish(out);
 
-    visualization_msgs::msg::MarkerArray markers;
-    int id_counter = 0;
+    // visualization_msgs::msg::MarkerArray markers;
+    // int id_counter = 0;
 
-    for (const auto &ob : out.obstacles) {
-        visualization_msgs::msg::Marker m;
-        m.header = out.header;
-        m.header.frame_id = "rslidar";
-        m.ns = "obstacle";
-        m.id = id_counter++;
-        m.type = visualization_msgs::msg::Marker::CUBE;
-        m.action = visualization_msgs::msg::Marker::ADD;
+    // for (const auto &ob : out.obstacles) {
+    //     visualization_msgs::msg::Marker m;
+    //     m.header = out.header;
+    //     m.header.frame_id = "rslidar";
+    //     m.ns = "obstacle";
+    //     m.id = ob.id;
+    //     m.type = visualization_msgs::msg::Marker::CUBE;
+    //     m.action = visualization_msgs::msg::Marker::ADD;
 
-        // centroid
-        m.pose = ob.pose;
+    //     // centroid
+    //     m.pose = ob.pose;
 
-        // size
-        m.scale.x = ob.length;
-        m.scale.y = ob.width;
-        m.scale.z = ob.z_max - ob.z_min;
+    //     // size
+    //     m.scale.x = ob.length;
+    //     m.scale.y = ob.width;
+    //     m.scale.z = ob.z_max - ob.z_min;
 
-        // z at the middle of the box
-        m.pose.position.z = (ob.z_min + ob.z_max) / 2.0;
+    //     // z at the middle of the box
+    //     m.pose.position.z = (ob.z_min + ob.z_max) / 2.0;
 
-        // color(convert cluster id to different color)
-        m.color = getColorFromId(m.id);
+    //     // color(convert cluster id to different color)
+    //     m.color = getColorFromId(m.id);
 
-        markers.markers.push_back(m);
-    }
+    //     markers.markers.push_back(m);
+    // }
 
-    RCLCPP_INFO(rclcpp::get_logger("MarkerPrinter"),
-                "Visualizing %d clouds", (int) markers.markers.size());
+    // RCLCPP_INFO(rclcpp::get_logger("MarkerPrinter"),
+    //             "Visualizing %d clouds", (int) markers.markers.size());
 
-    marker_pub_->publish(markers);
+    // marker_pub_->publish(markers);
 
   }
 

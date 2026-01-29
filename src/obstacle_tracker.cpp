@@ -19,6 +19,7 @@
 #include <vector>
 #include <cstdint>
 #include <opencv2/opencv.hpp>
+#include <open3d/Open3D.h>
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -57,7 +58,7 @@ public:
   : Node("obstacle_tracker")
   {
     bev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/bev_obstacles", 10);
-    match_pub_ = this->create_publisher<cev_msgs::msg::Obstacles>("rslidar_matches", 10);
+    match_pub_ = this->create_publisher<cev_msgs::msg::Obstacles>("/rslidar_matches", 10);
     prev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/prev", 10);
     curr_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/curr", 10);
     // nearest neighbor association method -> MHT
@@ -237,6 +238,7 @@ private:
         // icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
 
         std::vector<cv::Point2f> cv_points_curr;
+        // auto cloud = std::make_shared<open3d::geometry::PointCloud>();
         cv_points_curr.reserve(c.width * c.height);
 
         sensor_msgs::PointCloud2ConstIterator<float> in_x(c, "x");
@@ -244,9 +246,18 @@ private:
         sensor_msgs::PointCloud2ConstIterator<float> in_z(c, "z");
 
         for (; in_x != in_x.end(); ++in_x, ++in_y, ++in_z) {
+          // cloud->points_.push_back(Eigen::Vector3d(*in_x, *in_y, *in_z));
           cv_points_curr.emplace_back(*in_x, *in_y);
         }
         cv::RotatedRect rect = cv::minAreaRect(cv_points_curr);
+
+        // if (cloud && cloud->points_.size() > 3) {
+        //     cloud->RemoveNonFinitePoints();
+        //     if (cloud->points_.size() > 3) {
+        //         RCLCPP_INFO(this->get_logger(), "cloud size %d", cloud->points_.size());
+        //         auto obb = cloud->GetOrientedBoundingBox();
+        //     }
+        // }
 
         Box box_curr{rect.center.x, rect.center.y, 0.0f, 0.0f, rect.size.width, rect.size.height, rect.angle * M_PI / 180.0f, 0.0f, getClusterId(C_CURR[i])};
 
