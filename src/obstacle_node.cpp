@@ -168,6 +168,7 @@ private:
                 Eigen::Matrix3d R = obb.R_;
                 Eigen::Quaterniond q(R);
                 q.normalize();
+                Eigen::Vector3d angles = R.eulerAngles(0, 1, 2);
                 Eigen::Vector3d extent = obb.extent_;
 
                 visualization_msgs::msg::Marker m;
@@ -182,20 +183,31 @@ private:
                 m.pose.position.x = center.x();
                 m.pose.position.y = center.y();
                 m.pose.position.z = center.z();
+
+                if (q.w() < 0) {
+                  q.coeffs() *= -1;
+                }
                 m.pose.orientation.x = q.x();
                 m.pose.orientation.y = q.y();
                 m.pose.orientation.z = q.z();
                 m.pose.orientation.w = q.w();
 
                 // size
-                m.scale.x = extent.y();
-                m.scale.y = extent.x();
-                m.scale.z = extent.z();
-
-                // m.scale.x = extent.x();
+                // up down
+                // m.scale.x = extent.y();
+                // // front back
                 // m.scale.y = extent.z();
-                // m.scale.z = extent.y();
+                // // left right
+                // m.scale.z = extent.x();
 
+                m.scale.x = extent.x();
+                m.scale.y = extent.z();
+                m.scale.z = extent.y();
+
+                if (cloud->points_.size() > 1500) {
+                  RCLCPP_INFO(this->get_logger(), "x-angle (%f), y-angle (%f), z-angle(%f), q.x (%f), q.y (%f), q.z (%f), q.w (%f)", angles[0], angles[1], angles[2], q.x(), q.y(), q.z(), q.w());
+                }
+                
                 // xyz xzy yxz yzx zyx zxy
                 m.color = getColorFromId(m.id);
 
@@ -203,40 +215,40 @@ private:
             }
         }
 
-        cv::RotatedRect rect = cv::minAreaRect(cv_points);
+        // cv::RotatedRect rect = cv::minAreaRect(cv_points);
 
-        float cx = rect.center.x;
-        float cy = rect.center.y;
-        float w = rect.size.width;
-        float h = rect.size.height;
-        float angle_deg = rect.angle;
-        float yaw = angle_deg * M_PI / 180.0f;
+        // float cx = rect.center.x;
+        // float cy = rect.center.y;
+        // float w = rect.size.width;
+        // float h = rect.size.height;
+        // float angle_deg = rect.angle;
+        // float yaw = angle_deg * M_PI / 180.0f;
 
-        // length ≥ width
-        float length = std::max(w, h);
-        float width  = std::min(w, h);
+        // // length ≥ width
+        // float length = std::max(w, h);
+        // float width  = std::min(w, h);
 
-        // === Obstacle msg ===
-        obstacle::msg::Obstacle ob;
-        ob.id = cid;
-        ob.pose.position.x = cx;
-        ob.pose.position.y = cy;
-        ob.pose.position.z = 0.0;  // z_min
-        tf2::Quaternion q;
-        q.setRPY(0, 0, yaw);
-        ob.pose.orientation.x = q.x();
-        ob.pose.orientation.y = q.y();
-        ob.pose.orientation.z = q.z();
-        ob.pose.orientation.w = q.w();
+        // // === Obstacle msg ===
+        // obstacle::msg::Obstacle ob;
+        // ob.id = cid;
+        // ob.pose.position.x = cx;
+        // ob.pose.position.y = cy;
+        // ob.pose.position.z = 0.0;  // z_min
+        // tf2::Quaternion q;
+        // q.setRPY(0, 0, yaw);
+        // ob.pose.orientation.x = q.x();
+        // ob.pose.orientation.y = q.y();
+        // ob.pose.orientation.z = q.z();
+        // ob.pose.orientation.w = q.w();
 
-        ob.length = length;
-        ob.width  = width;
-        ob.z_min  = z_min;
-        ob.z_max  = z_max;
+        // ob.length = length;
+        // ob.width  = width;
+        // ob.z_min  = z_min;
+        // ob.z_max  = z_max;
 
-        ob.blocking = (z_max - z_min > 0.1);
+        // ob.blocking = (z_max - z_min > 0.1);
 
-        out.obstacles.push_back(ob);
+        // out.obstacles.push_back(ob);
 
         // RCLCPP_INFO(this->get_logger(),
         //             "Cluster %d -> obstacle center=(%.2f,%.2f), L=%.2f W=%.2f yaw=%.2f rad",
@@ -246,10 +258,10 @@ private:
     marker_pub_->publish(obb_markers);
 
     // === publish ObstacleArray ===
-    obs_pub_->publish(out);
+    // obs_pub_->publish(out);
 
     // visualization_msgs::msg::MarkerArray markers;
-    // int id_counter = 0;
+    // // int id_counter = 0;
 
     // for (const auto &ob : out.obstacles) {
     //     visualization_msgs::msg::Marker m;
