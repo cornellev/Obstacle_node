@@ -166,6 +166,8 @@ private:
 
   // some version of iou, which is sometimes bad. 
   float boxLoss(const Box& a, const Box& b) {
+    RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f), (yaw) : (%f, %f)", a.cid, a.cx, a.cy, a.length, a.width, a.yaw);
+    RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f), (yaw) : (%f, %f)", b.cid, b.cx, b.cy, b.length, b.width, b.yaw);
     // Tunable normalization constants
     const float d_max = 10.0f;   // meters
     const float l_max = 5.0f;    // meters
@@ -189,6 +191,7 @@ private:
     float d_yaw = std::abs(wrapAngle(a.yaw - b.yaw));
     float D_yaw = d_yaw / static_cast<float>(M_PI);
 
+    RCLCPP_INFO(this->get_logger(), "LOSS IS %f", w_d * D_pos + w_s * D_size + w_y * D_yaw);
     return w_d * D_pos + w_s * D_size + w_y * D_yaw;
   }
 
@@ -294,13 +297,18 @@ private:
                       if (cloud_prev->points_.size() > 3) {
                           auto obb_prev = cloud_prev->GetOrientedBoundingBox();
 
+                          Eigen::Vector3d center_prev = obb_prev.center_;
                           Eigen::Matrix3d R_prev = obb_prev.R_;
                           double yaw_prev = std::atan2(R_prev(1,0), R_prev(0,0));
-                          Box box_prev{obb_prev.center_.x(), obb_prev.center_.y(), 0.0f, 0.0f, obb_prev.extent_.x(), obb_prev.extent_.z(), yaw_prev, 0.0f, getClusterId(c_prev)};  
+                          Eigen::Vector3d extent_prev = obb_prev.extent_;
 
-                          if (transform.count(getClusterId(c_prev)) > 0) {
-                            box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
-                          }
+                          Box box_prev{center_prev.x(), center_prev.y(), 0.0f, 0.0f, extent_prev.x(), extent_prev.z(), yaw_prev, 0.0f, getClusterId(c_prev)};  
+
+
+                          // THIS IS A VERY BAD FUNCTION THAT IS TURNING FLOATS INTO INTS
+                          // if (transform.count(getClusterId(c_prev)) > 0) {
+                          //   box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
+                          // }
 
                           Edge edge;
                           edge.edge = std::make_tuple(j, i);
@@ -475,6 +483,7 @@ private:
             }
           } else {
             cluster_id = getClusterId(C_PREV[prev_idx]);
+            RCLCPP_INFO(this->get_logger(), "BOX A (%d) -- BOX B (%d)", curr_idx, cluster_id);
             transform[cluster_id] = T[curr_idx][prev_idx];
           }
 
