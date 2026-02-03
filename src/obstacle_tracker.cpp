@@ -61,6 +61,7 @@ public:
     match_pub_ = this->create_publisher<cev_msgs::msg::Obstacles>("/rslidar_matches", 10);
     prev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/prev", 10);
     curr_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/curr", 10);
+    marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("obstacle_markers", 10);
     // nearest neighbor association method -> MHT
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
       "/rslidar_clusters", 10,
@@ -218,7 +219,6 @@ private:
         std::vector<Transform>(max_size, Transform{std::make_tuple(0.0f, 0.0f), 0.0f})
     );
 
-
     // bipartite graph construction:
     // C_PREV (t-1), C_CURR (t): sets of clusters at time t-1 and t, C_PREV \intersect C_CURR = \emptyset
     // E: set of edges with elements (c_prev, c) s.t. c_prev \in C_PREV and c \in C_CURR
@@ -227,11 +227,12 @@ private:
     if (max_size == 0) return;
 
     auto start = std::chrono::high_resolution_clock::now();
-    std::mutex mtx;
-    std::vector<std::future<void>> futures;
+
+    visualization_msgs::msg::MarkerArray obb_markers;
 
     for (int i = 0; i < C_CURR.size(); ++i) {
         int j = 0;
+        // a current cluster
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         if (c.width * c.height == 0) continue;
         
@@ -241,59 +242,77 @@ private:
         // auto cloud = std::make_shared<open3d::geometry::PointCloud>();
         cv_points_curr.reserve(c.width * c.height);
 
-        sensor_msgs::PointCloud2ConstIterator<float> in_x(c, "x");
-        sensor_msgs::PointCloud2ConstIterator<float> in_y(c, "y");
-        sensor_msgs::PointCloud2ConstIterator<float> in_z(c, "z");
+        sensor_msgs::PointCloud2ConstIterator<float> iter_x(c, "x");
+        sensor_msgs::PointCloud2ConstIterator<float> iter_y(c, "y");
+        sensor_msgs::PointCloud2ConstIterator<float> iter_z(c, "z");
 
-        for (; in_x != in_x.end(); ++in_x, ++in_y, ++in_z) {
-          // cloud->points_.push_back(Eigen::Vector3d(*in_x, *in_y, *in_z));
-          cv_points_curr.emplace_back(*in_x, *in_y);
-        }
-        cv::RotatedRect rect = cv::minAreaRect(cv_points_curr);
+        auto cloud = std::make_shared<open3d::geometry::PointCloud>();
 
-        // if (cloud && cloud->points_.size() > 3) {
-        //     cloud->RemoveNonFinitePoints();
-        //     if (cloud->points_.size() > 3) {
-        //         RCLCPP_INFO(this->get_logger(), "cloud size %d", cloud->points_.size());
-        //         auto obb = cloud->GetOrientedBoundingBox();
-        //     }
-        // }
+        float z_min = std::numeric_limits<float>::max();
+        float z_max = std::numeric_limits<float>::lowest();
 
-        Box box_curr{rect.center.x, rect.center.y, 0.0f, 0.0f, rect.size.width, rect.size.height, rect.angle * M_PI / 180.0f, 0.0f, getClusterId(C_CURR[i])};
+        for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
+            cloud->points_.push_back(Eigen::Vector3d(*iter_x, *iter_y, *iter_z));
+            z_min = std::min(z_min, *iter_z);
+            z_max = std::max(z_max, *iter_z);
+        };
 
-        for (int j = 0; j < C_PREV.size(); ++j) {
-          sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
+        auto maybe_m = generateOBB(getClusterId(C_CURR[i]), cloud, z_min, z_max);
+        if (maybe_m) { 
+          visualization_msgs::msg::Marker m = *maybe_m;
+          m.header.frame_id = "rslidar";
+          obb_markers.markers.push_back(m) ;
+        };
 
-          std::vector<cv::Point2f> cv_points_prev;
-          cv_points_prev.reserve(c.width * c.height);
+        if (cloud && cloud->points_.size() > 3) {
+            cloud->RemoveNonFinitePoints();
+            if (cloud->points_.size() > 3) {
+                auto obb = cloud->GetOrientedBoundingBox();
 
-          sensor_msgs::PointCloud2ConstIterator<float> in_x(c, "x");
-          sensor_msgs::PointCloud2ConstIterator<float> in_y(c, "y");
-          sensor_msgs::PointCloud2ConstIterator<float> in_z(c, "z");
+                Eigen::Vector3d center = obb.center_;
+                Eigen::Matrix3d R = obb.R_;
+                double yaw = std::atan2(R(1,0), R(0,0));
+                Eigen::Vector3d extent = obb.extent_;
 
-          for (; in_x != in_x.end(); ++in_x, ++in_y, ++in_z) {
-            cv_points_prev.emplace_back(*in_x, *in_y);
-          }
-          cv::RotatedRect rect = cv::minAreaRect(cv_points_prev);
+                Box box_curr{center.x(), center.y(), 0.0f, 0.0f, extent.x(), extent.z(), yaw, 0.0f, getClusterId(C_CURR[i])};  
 
-          // instead of the actual previous box, we use the predicted new orientation and shape of the box given
-          // past information from the same cluster_id over time, and use that prediction for the loss computation
-          // vs. current boxes
-          // could probably also use this to maybe merge clusters: if satisfying the cases that these clusters
-          // are within the predicted new box, not in the vicinity of any other previous matched clusters.
-          Box box_prev{rect.center.x, rect.center.y, 0.0f, 0.0f, rect.size.width, rect.size.height, rect.angle * M_PI / 180.0f, 0.0f, getClusterId(c_prev)};
-          if (transform.count(getClusterId(c_prev)) > 0) {
-            box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
-          }
+                for (int j = 0; j < C_PREV.size(); ++j) {
+                    sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
 
-          Edge edge;
-          edge.edge = std::make_tuple(j, i);
-          // edge.weight = result.cost;
-          edge.weight = boxLoss(box_curr, box_prev);
+                    auto cloud_prev = std::make_shared<open3d::geometry::PointCloud>();
 
-          E.push_back(edge);
-          C[i][j] = edge.weight;
-          T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
+                    sensor_msgs::PointCloud2ConstIterator<float> iter_x(c_prev, "x");
+                    sensor_msgs::PointCloud2ConstIterator<float> iter_y(c_prev, "y");
+                    sensor_msgs::PointCloud2ConstIterator<float> iter_z(c_prev, "z");
+
+                    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
+                        cloud_prev->points_.push_back(Eigen::Vector3d(*iter_x, *iter_y, *iter_z));
+                    };
+
+                    if (cloud_prev && cloud_prev->points_.size() > 3) {
+                      cloud_prev->RemoveNonFinitePoints();
+                      if (cloud_prev->points_.size() > 3) {
+                          auto obb_prev = cloud_prev->GetOrientedBoundingBox();
+
+                          Eigen::Matrix3d R_prev = obb_prev.R_;
+                          double yaw_prev = std::atan2(R_prev(1,0), R_prev(0,0));
+                          Box box_prev{obb_prev.center_.x(), obb_prev.center_.y(), 0.0f, 0.0f, obb_prev.extent_.x(), obb_prev.extent_.z(), yaw_prev, 0.0f, getClusterId(c_prev)};  
+
+                          if (transform.count(getClusterId(c_prev)) > 0) {
+                            box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
+                          }
+
+                          Edge edge;
+                          edge.edge = std::make_tuple(j, i);
+                          edge.weight = boxLoss(box_curr, box_prev);
+
+                          E.push_back(edge);
+                          C[i][j] = edge.weight;
+                          T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
+                      }
+                    }
+                }
+            }
         }
     }
 
@@ -343,6 +362,7 @@ private:
     // i should define a global parameter that maps
     // cluster_id : prev pc, prev box, prev state (xt-1)
   // compute velocity via dx/dt
+    marker_pub_->publish(obb_markers);  
     obs_msg_prev_ = C_CURR;
   }
 
@@ -356,6 +376,51 @@ private:
     color.a = 0.5f;
 
     return color;
+  }
+
+  std::optional<visualization_msgs::msg::Marker> generateOBB(int cid, std::shared_ptr<open3d::geometry::PointCloud> cloud, float z_min, float z_max) 
+  {
+    if (cloud && cloud->points_.size() > 3) {
+        cloud->RemoveNonFinitePoints();
+        if (cloud->points_.size() > 3) {
+            auto obb = cloud->GetOrientedBoundingBox();
+
+            Eigen::Vector3d center = obb.center_;
+
+            Eigen::Matrix3d R = obb.R_;
+            double yaw = std::atan2(R(1,0), R(0,0));
+            Eigen::AngleAxisd yaw_rot(yaw, Eigen::Vector3d::UnitZ());
+            Eigen::Quaterniond q(yaw_rot);
+            q.normalize();
+
+            Eigen::Vector3d extent = obb.extent_;
+
+            visualization_msgs::msg::Marker m;
+            m.ns = "obstacle";
+            m.id = cid;
+            m.type = visualization_msgs::msg::Marker::CUBE;
+            m.action = visualization_msgs::msg::Marker::ADD;
+
+            // we will describe an OBB with: center, orientation, scale
+            // centroid
+            m.pose.position.x = center.x();
+            m.pose.position.y = center.y();
+            m.pose.position.z = (z_max + z_min) / 2;
+
+            m.pose.orientation.x = q.x();
+            m.pose.orientation.y = q.y();
+            m.pose.orientation.z = q.z();
+            m.pose.orientation.w = q.w();
+
+            m.scale.x = extent.x();
+            m.scale.y = extent.z();
+            m.scale.z = z_max - z_min;
+
+            m.color = getColorFromId(m.id);
+            return m;
+        }
+    }
+    return std::nullopt;
   }
 
   void writeClusterIds(
@@ -554,6 +619,7 @@ private:
   int max_active_id = 0;
   // maps cluster_id to a state change
   std::map<uint8_t, Transform> transform;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
   // float dt;
 };
 

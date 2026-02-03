@@ -116,11 +116,6 @@ private:
       float z_max = std::numeric_limits<float>::lowest();
 
       for (const auto &p : pts) {
-        // z_min = std::min(z_min, p.z);
-        // z_max = std::max(z_max, p.z);
-        // if (p.z >= z_min_allowed && p.z <= z_max_allowed) {
-        //   kept.push_back(p);
-        // }
         kept.push_back(p);
       }
 
@@ -140,148 +135,23 @@ private:
         const auto &pts = kv.second;
 
         if (pts.size() < 3) {
-            RCLCPP_WARN(this->get_logger(),
-                        "Cluster %d has only %zu points, skipping OBB",
-                        cid, pts.size());
-            continue;
+          RCLCPP_WARN(this->get_logger(),
+                      "Cluster %d has only %zu points, skipping OBB",
+                      cid, pts.size());
+          continue;
+        } else {
+          auto maybe_m = generateOBB(cid, pts);
+          if (maybe_m) { 
+            visualization_msgs::msg::Marker m = *maybe_m;
+            m.header = msg->header;
+            m.header.frame_id = "rslidar";
+            obb_markers.markers.push_back(m) ;
+          };
         }
-
-        std::vector<cv::Point2f> cv_points;
-        auto cloud = std::make_shared<open3d::geometry::PointCloud>();
-
-        cv_points.reserve(pts.size());
-        float z_min = std::numeric_limits<float>::max();
-        float z_max = std::numeric_limits<float>::lowest();
-        for (const auto &p : pts) {
-            cv_points.emplace_back(p.x, p.y);
-            cloud->points_.push_back(Eigen::Vector3d(p.x, p.y, p.z));
-            z_min = std::min(z_min, p.z);
-            z_max = std::max(z_max, p.z);
-        }
-
-        if (cloud && cloud->points_.size() > 3) {
-            cloud->RemoveNonFinitePoints();
-            if (cloud->points_.size() > 3) {
-                RCLCPP_INFO(this->get_logger(), "cloud size %d", cloud->points_.size());
-                auto obb = cloud->GetOrientedBoundingBox();
-                Eigen::Vector3d center = obb.center_;
-                Eigen::Matrix3d R = obb.R_;
-                Eigen::Quaterniond q(R);
-                q.normalize();
-                Eigen::Vector3d extent = obb.extent_;
-
-                visualization_msgs::msg::Marker m;
-                m.header = msg->header;
-                m.header.frame_id = "rslidar";
-                m.ns = "obstacle";
-                m.id = cid;
-                m.type = visualization_msgs::msg::Marker::CUBE;
-                m.action = visualization_msgs::msg::Marker::ADD;
-
-                // centroid
-                m.pose.position.x = center.x();
-                m.pose.position.y = center.y();
-                m.pose.position.z = center.z();
-                m.pose.orientation.x = q.x();
-                m.pose.orientation.y = q.y();
-                m.pose.orientation.z = q.z();
-                m.pose.orientation.w = q.w();
-
-                // size
-                m.scale.x = extent.y();
-                m.scale.y = extent.x();
-                m.scale.z = extent.z();
-
-                // m.scale.x = extent.x();
-                // m.scale.y = extent.z();
-                // m.scale.z = extent.y();
-
-                // xyz xzy yxz yzx zyx zxy
-                m.color = getColorFromId(m.id);
-
-                obb_markers.markers.push_back(m);
-            }
-        }
-
-        cv::RotatedRect rect = cv::minAreaRect(cv_points);
-
-        float cx = rect.center.x;
-        float cy = rect.center.y;
-        float w = rect.size.width;
-        float h = rect.size.height;
-        float angle_deg = rect.angle;
-        float yaw = angle_deg * M_PI / 180.0f;
-
-        // length ≥ width
-        float length = std::max(w, h);
-        float width  = std::min(w, h);
-
-        // === Obstacle msg ===
-        obstacle::msg::Obstacle ob;
-        ob.id = cid;
-        ob.pose.position.x = cx;
-        ob.pose.position.y = cy;
-        ob.pose.position.z = 0.0;  // z_min
-        tf2::Quaternion q;
-        q.setRPY(0, 0, yaw);
-        ob.pose.orientation.x = q.x();
-        ob.pose.orientation.y = q.y();
-        ob.pose.orientation.z = q.z();
-        ob.pose.orientation.w = q.w();
-
-        ob.length = length;
-        ob.width  = width;
-        ob.z_min  = z_min;
-        ob.z_max  = z_max;
-
-        ob.blocking = (z_max - z_min > 0.1);
-
-        out.obstacles.push_back(ob);
-
-        // RCLCPP_INFO(this->get_logger(),
-        //             "Cluster %d -> obstacle center=(%.2f,%.2f), L=%.2f W=%.2f yaw=%.2f rad",
-        //             cid, cx, cy, length, width, yaw);
     }
 
     marker_pub_->publish(obb_markers);
-
-    // === publish ObstacleArray ===
     obs_pub_->publish(out);
-
-    // visualization_msgs::msg::MarkerArray markers;
-    // int id_counter = 0;
-
-    // for (const auto &ob : out.obstacles) {
-    //     visualization_msgs::msg::Marker m;
-    //     m.header = out.header;
-    //     m.header.frame_id = "rslidar";
-    //     m.ns = "obstacle";
-    //     m.id = ob.id;
-    //     m.type = visualization_msgs::msg::Marker::CUBE;
-    //     m.action = visualization_msgs::msg::Marker::ADD;
-
-    //     // centroid
-    //     m.pose = ob.pose;
-
-    //     // size
-    //     m.scale.x = ob.length;
-    //     m.scale.y = ob.width;
-    //     m.scale.z = ob.z_max - ob.z_min;
-
-    //     // z at the middle of the box
-    //     m.pose.position.z = (ob.z_min + ob.z_max) / 2.0;
-
-    //     // color(convert cluster id to different color)
-    //     m.color = getColorFromId(m.id);
-
-    //     markers.markers.push_back(m);
-    // }
-
-    // RCLCPP_INFO(rclcpp::get_logger("MarkerPrinter"),
-    //             "Visualizing %d clouds", (int) markers.markers.size());
-
-    // marker_pub_->publish(markers);
-
   }
 
   std_msgs::msg::ColorRGBA getColorFromId(int cluster_id)
@@ -294,6 +164,62 @@ private:
     color.a = 0.5f;
 
     return color;
+  }
+
+  std::optional<visualization_msgs::msg::Marker> generateOBB(int cid, std::vector<PointXYZCluster> pts) 
+  {
+    auto cloud = std::make_shared<open3d::geometry::PointCloud>();
+
+    float z_min = std::numeric_limits<float>::max();
+    float z_max = std::numeric_limits<float>::lowest();
+
+    for (const auto &p : pts) {
+        cloud->points_.push_back(Eigen::Vector3d(p.x, p.y, p.z));
+        z_min = std::min(z_min, p.z);
+        z_max = std::max(z_max, p.z);
+    }
+
+    if (cloud && cloud->points_.size() > 3) {
+        cloud->RemoveNonFinitePoints();
+        if (cloud->points_.size() > 3) {
+            auto obb = cloud->GetOrientedBoundingBox();
+
+            Eigen::Vector3d center = obb.center_;
+
+            Eigen::Matrix3d R = obb.R_;
+            double yaw = std::atan2(R(1,0), R(0,0));
+            Eigen::AngleAxisd yaw_rot(yaw, Eigen::Vector3d::UnitZ());
+            Eigen::Quaterniond q(yaw_rot);
+            q.normalize();
+
+            Eigen::Vector3d extent = obb.extent_;
+
+            visualization_msgs::msg::Marker m;
+            m.ns = "obstacle";
+            m.id = cid;
+            m.type = visualization_msgs::msg::Marker::CUBE;
+            m.action = visualization_msgs::msg::Marker::ADD;
+
+            // we will describe an OBB with: center, orientation, scale
+            // centroid
+            m.pose.position.x = center.x();
+            m.pose.position.y = center.y();
+            m.pose.position.z = (z_max + z_min) / 2;
+
+            m.pose.orientation.x = q.x();
+            m.pose.orientation.y = q.y();
+            m.pose.orientation.z = q.z();
+            m.pose.orientation.w = q.w();
+
+            m.scale.x = extent.x();
+            m.scale.y = extent.z();
+            m.scale.z = z_max - z_min;
+
+            m.color = getColorFromId(m.id);
+            return m;
+        }
+    }
+    return std::nullopt;
   }
 
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
