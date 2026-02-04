@@ -46,6 +46,12 @@ struct Box {
   int cid;
 };
 
+struct OBB {
+  Eigen::Vector3d center;
+  Eigen::Vector3d extent;
+  float yaw;
+};
+
 struct Transform {
   std::tuple<float, float> vel;
   float yaw_rate;
@@ -63,9 +69,9 @@ public:
     curr_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/curr", 10);
     marker_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("obstacle_markers", 10);
     // nearest neighbor association method -> MHT
-    pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/rslidar_clusters", 10,
-      std::bind(&ObstacleTracker::pcCallback, this, std::placeholders::_1));
+    // pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
+    //   "/rslidar_clusters", 10,
+    //   std::bind(&ObstacleTracker::pcCallback, this, std::placeholders::_1));
 
     obs_sub_ = this->create_subscription<cev_msgs::msg::Obstacles>(
       "/rslidar_obstacles", 10,
@@ -114,8 +120,6 @@ private:
       C[c.cluster_id].push_back(c);
       ++total_points;
     }
-
-    RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_prev_.size(), C.size());
     // after all the cluster matching and whatever is done, update C_prev
     // we can also use this to determine static v. dynamic obstacles
 
@@ -166,8 +170,8 @@ private:
 
   // some version of iou, which is sometimes bad. 
   float boxLoss(const Box& a, const Box& b) {
-    RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f), (yaw) : (%f, %f)", a.cid, a.cx, a.cy, a.length, a.width, a.yaw);
-    RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f), (yaw) : (%f, %f)", b.cid, b.cx, b.cy, b.length, b.width, b.yaw);
+    RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", a.cid, a.cx, a.cy, a.length, a.width);
+    RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", b.cid, b.cx, b.cy, b.length, b.width);
     // Tunable normalization constants
     const float d_max = 10.0f;   // meters
     const float l_max = 5.0f;    // meters
@@ -190,10 +194,49 @@ private:
     // Yaw difference
     float d_yaw = std::abs(wrapAngle(a.yaw - b.yaw));
     float D_yaw = d_yaw / static_cast<float>(M_PI);
-
     RCLCPP_INFO(this->get_logger(), "LOSS IS %f", w_d * D_pos + w_s * D_size + w_y * D_yaw);
     return w_d * D_pos + w_s * D_size + w_y * D_yaw;
   }
+
+  float obbLoss(const OBB& a, const OBB& b)
+  {
+      // --- Tunable parameters ---
+      const double d_max = 0.0;   // max distance for normalization
+      const double w_d   = 0.4;    // distance weight
+      const double w_iou = 0.4;    // IoU weight
+      const double w_v   = 0.2;    // volume weight
+
+      // --- Center distance ---
+      Eigen::Vector3d d = a.center - b.center;
+      double D_pos = d.norm() / d_max;
+      D_pos = std::min(D_pos, 1.0);
+
+      // --- Approximate 3D IoU using centers and extents ---
+      double dx = std::abs(a.center.x() - b.center.x());
+      double dy = std::abs(a.center.y() - b.center.y());
+      double dz = std::abs(a.center.z() - b.center.z());
+
+      double overlap_x = std::max(0.0, (a.extent.x() + b.extent.x())/2 - dx);
+      double overlap_y = std::max(0.0, (a.extent.y() + b.extent.y())/2 - dy);
+      double overlap_z = std::max(0.0, (a.extent.z() + b.extent.z())/2 - dz);
+
+      double interVol = overlap_x * overlap_y * overlap_z;
+
+      double volA = a.extent.x() * a.extent.y() * a.extent.z();
+      double volB = b.extent.x() * b.extent.y() * b.extent.z();
+      double unionVol = volA + volB - interVol;
+
+      double approxIoU = (unionVol > 0.0) ? interVol / unionVol : 0.0;
+      double D_iou = 1.0 - approxIoU;
+
+      // --- Volume difference term ---
+      double D_vol = std::abs(volA - volB) / std::max(volA, volB);
+      D_vol = std::min(D_vol, 1.0);
+
+      // --- Final cost ---
+      return static_cast<float>(w_d * D_pos + w_iou * D_iou + w_v * D_vol);
+  }
+
 
   Box predictBox(const Box& prev, Transform transform) {
       Box pred = prev;
@@ -233,6 +276,10 @@ private:
 
     visualization_msgs::msg::MarkerArray obb_markers;
 
+    for (int j = 0; j < C_PREV.size(); ++j) {
+        RCLCPP_INFO(this->get_logger(), "c_prev %d", getClusterId(C_PREV[j]));
+    }
+
     for (int i = 0; i < C_CURR.size(); ++i) {
         int j = 0;
         // a current cluster
@@ -242,7 +289,6 @@ private:
         // icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
 
         std::vector<cv::Point2f> cv_points_curr;
-        // auto cloud = std::make_shared<open3d::geometry::PointCloud>();
         cv_points_curr.reserve(c.width * c.height);
 
         sensor_msgs::PointCloud2ConstIterator<float> iter_x(c, "x");
@@ -273,11 +319,14 @@ private:
                 auto obb = cloud->GetOrientedBoundingBox();
 
                 Eigen::Vector3d center = obb.center_;
+
                 Eigen::Matrix3d R = obb.R_;
                 double yaw = std::atan2(R(1,0), R(0,0));
+
                 Eigen::Vector3d extent = obb.extent_;
 
                 Box box_curr{center.x(), center.y(), 0.0f, 0.0f, extent.x(), extent.z(), yaw, 0.0f, getClusterId(C_CURR[i])};  
+                // OBB box_curr{center, extent, yaw};
 
                 for (int j = 0; j < C_PREV.size(); ++j) {
                     sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
@@ -298,13 +347,14 @@ private:
                           auto obb_prev = cloud_prev->GetOrientedBoundingBox();
 
                           Eigen::Vector3d center_prev = obb_prev.center_;
+                          
                           Eigen::Matrix3d R_prev = obb_prev.R_;
-                          double yaw_prev = std::atan2(R_prev(1,0), R_prev(0,0));
+                          double yaw_prev = std::atan2(R(1,0), R(0,0));
+
                           Eigen::Vector3d extent_prev = obb_prev.extent_;
-
+                          
                           Box box_prev{center_prev.x(), center_prev.y(), 0.0f, 0.0f, extent_prev.x(), extent_prev.z(), yaw_prev, 0.0f, getClusterId(c_prev)};  
-
-
+                          // OBB box_prev{center_prev, extent_prev, yaw_prev};
                           // THIS IS A VERY BAD FUNCTION THAT IS TURNING FLOATS INTO INTS
                           // if (transform.count(getClusterId(c_prev)) > 0) {
                           //   box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
@@ -313,10 +363,16 @@ private:
                           Edge edge;
                           edge.edge = std::make_tuple(j, i);
                           edge.weight = boxLoss(box_curr, box_prev);
+                          // edge.weight = obbLoss(box_curr, box_prev);
 
                           E.push_back(edge);
-                          C[i][j] = edge.weight;
-                          T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
+                          // try to force some predefined matches
+                          if (edge.weight >= 0.05f) {
+                            C[i][j] = edge.weight;
+                          } else {
+                            C[i][j] = -1/edge.weight;
+                          }
+                          // T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
                       }
                     }
                 }
@@ -334,6 +390,7 @@ private:
 
     for (int i = 0; i < matchings.size(); ++i) {
       // prev_idx may not be the previous cluster's cluster_id
+      // matchings[j_prev] = i_curr;
       int prev_idx = i;
       int curr_idx = matchings[i];
 
@@ -353,7 +410,6 @@ private:
       }
     }
 
-    // auto markers = outputMatching(C_PREV, C_CURR, matchings);
     writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T);
 
     // given cluster_id of past C_PREV, output C_CURR s.t. the cluster_id is consistent 
@@ -457,37 +513,48 @@ private:
       sensor_msgs::PointCloud2Iterator<uint8_t> out_g(bev_points, "g");
       sensor_msgs::PointCloud2Iterator<uint8_t> out_b(bev_points, "b");
 
-      RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d", C_PREV.size(), C_CURR.size());
-
+      RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d\n", C_PREV.size(), C_CURR.size());
       for (int i = 0; i < matchings.size(); ++i) {
+        // job[j_prev] = i_curr;
           int prev_idx = i;
           int curr_idx = matchings[i];
 
-          if (curr_idx == -1 || curr_idx >= C_CURR.size()) {
-            // if c_prev --- invalid c_curr: then this c_prev is just not matched to anything: skip
-            continue;
+          if (prev_idx >= 0 && prev_idx < C_PREV.size()) {
+            RCLCPP_INFO(this->get_logger(), "match prev_idx [%d], %d -- curr_idx [%d]", prev_idx, getClusterId(C_PREV[prev_idx]), curr_idx);
           }
+      }
 
+      RCLCPP_INFO(this->get_logger(), "\n");
+
+      std::vector<int> curr_to_prev(C_CURR.size(), -1);
+      for (int prev_idx = 0; prev_idx < matchings.size(); ++prev_idx) {
+          int curr_idx = matchings[prev_idx];
+
+          if (curr_idx >= 0 && curr_idx < C_CURR.size()) {
+            curr_to_prev[curr_idx] = prev_idx;
+          }
+      }
+
+      for (int curr_idx = 0; curr_idx < C_CURR.size(); ++curr_idx) {
+          RCLCPP_INFO(this->get_logger(), "BEFORE CLUSTER_ID (%d)", curr_idx);
           // == LOGIC FOR SETTING CLUSTER_ID ==
+          int prev_idx = curr_to_prev[curr_idx];
           uint32_t cluster_id;
-          if (prev_idx == -1 || prev_idx >= C_PREV.size()) {
+          if (prev_idx >= 0 && prev_idx < C_PREV.size()) {
+            cluster_id = getClusterId(C_PREV[prev_idx]);
+          } else {
             // if c_curr --- invalid c_prev: then this c_curr is not matched to anything: assign new unique cluster_id
             // this new unique cluster_id is either an inactive id in inactive_ids, or max_active_id 
             if (!inactive_ids.empty()) {
               cluster_id = inactive_ids.back();
               inactive_ids.pop_back();
-              RCLCPP_INFO(this->get_logger(), "Inactive_ids: %d\n", inactive_ids.size());
             } else {
-              cluster_id = max_active_id;
-              max_active_id++;
+              cluster_id = max_active_id++;
             }
-          } else {
-            cluster_id = getClusterId(C_PREV[prev_idx]);
-            RCLCPP_INFO(this->get_logger(), "BOX A (%d) -- BOX B (%d)", curr_idx, cluster_id);
-            transform[cluster_id] = T[curr_idx][prev_idx];
           }
-
+    
           setClusterId(C_CURR[curr_idx], cluster_id);
+          RCLCPP_INFO(this->get_logger(), "RESULT CLUSTER_ID (%d)", cluster_id);
 
           std::vector<cv::Point2f> cv_points;
           cv_points.reserve(C_CURR[curr_idx].width * C_CURR[curr_idx].height);
@@ -546,6 +613,7 @@ private:
   std::vector<int> hungarian_assignment(std::vector<std::vector<float>> mat)  {
     // i is the cluster id of C_PREV, job[i] is the cluster id of C_CURR
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
+    // job[j_prev] = i_curr;
     const int J = mat.size(); // cost_matrix.rows() is C_CURR idx
     assert(J > 0);
     const int W = mat[0].size(); // cost_matrix.cols() is C_PREV idx
@@ -616,6 +684,49 @@ private:
     return job;
   }
 
+  std::vector<int> hungarian_assignment_with_threshold(
+    const std::vector<std::vector<float>>& mat,
+    float max_cost = 2.0f,   // reject assignments above this
+    float min_cost = 0.05f    // force assignments below this
+) {
+    // Step 1: Run your existing Hungarian algorithm
+    std::vector<int> assignment = hungarian_assignment(mat);  // job[w] = i_curr
+
+    const int W = mat[0].size(); // C_PREV
+    const int J = mat.size();    // C_CURR
+
+    // Step 2: Reject assignments above max_cost
+    for (int w = 0; w < W; ++w) {
+        int iCurr = assignment[w];
+        if (iCurr >= 0) {
+            float cost = mat[iCurr][w];
+            if (cost > max_cost) {
+                assignment[w] = -1;  // treat as unassigned
+            }
+        }
+    }
+
+    // Step 3: Force very low-loss matches
+    for (int j = 0; j < J; ++j) {
+        float best_cost = mat[j][0];
+        int best_w = 0;
+        for (int w = 1; w < W; ++w) {
+            if (mat[j][w] < best_cost) {
+                best_cost = mat[j][w];
+                best_w = w;
+            }
+        }
+
+        // If this match is very good and C_PREV is not already assigned
+        if (best_cost < min_cost && assignment[best_w] == -1) {
+            assignment[best_w] = j;
+        }
+    }
+
+    return assignment;
+}
+
+
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr prev_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr curr_pub_;
   rclcpp::Publisher<cev_msgs::msg::Obstacles>::SharedPtr match_pub_;
@@ -623,7 +734,7 @@ private:
   std::vector<sensor_msgs::msg::PointCloud2> obs_msg_prev_;
   std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev_;
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
-  rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
+  // rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr bev_pub_;
   int max_active_id = 0;
   // maps cluster_id to a state change
