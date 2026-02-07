@@ -170,8 +170,8 @@ private:
 
   // some version of iou, which is sometimes bad. 
   float boxLoss(const Box& a, const Box& b) {
-    RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", a.cid, a.cx, a.cy, a.length, a.width);
-    RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", b.cid, b.cx, b.cy, b.length, b.width);
+    // RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", a.cid, a.cx, a.cy, a.length, a.width);
+    // RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", b.cid, b.cx, b.cy, b.length, b.width);
     // Tunable normalization constants
     const float d_max = 10.0f;   // meters
     const float l_max = 5.0f;    // meters
@@ -194,7 +194,7 @@ private:
     // Yaw difference
     float d_yaw = std::abs(wrapAngle(a.yaw - b.yaw));
     float D_yaw = d_yaw / static_cast<float>(M_PI);
-    RCLCPP_INFO(this->get_logger(), "LOSS IS %f", w_d * D_pos + w_s * D_size + w_y * D_yaw);
+    // RCLCPP_INFO(this->get_logger(), "LOSS IS %f", w_d * D_pos + w_s * D_size + w_y * D_yaw);
     return w_d * D_pos + w_s * D_size + w_y * D_yaw;
   }
 
@@ -254,6 +254,9 @@ private:
     cev_msgs::msg::Obstacles obstacles_msg;
     obstacles_msg.obstacles.reserve(C_CURR.size());
 
+    // map i_curr to j_prev
+    std::unordered_map<int32_t, int32_t> predefined_matches;
+
     // or maybe a mapping from (c_prev, c) -> edge weight, we'll see
     // hungarian algorithm takes in cost (adjacency) matrix where C_CURR is row
     // C_PREV is col
@@ -276,9 +279,9 @@ private:
 
     visualization_msgs::msg::MarkerArray obb_markers;
 
-    for (int j = 0; j < C_PREV.size(); ++j) {
-        RCLCPP_INFO(this->get_logger(), "c_prev %d", getClusterId(C_PREV[j]));
-    }
+    // for (int j = 0; j < C_PREV.size(); ++j) {
+    //     RCLCPP_INFO(this->get_logger(), "c_prev %d", getClusterId(C_PREV[j]));
+    // }
 
     for (int i = 0; i < C_CURR.size(); ++i) {
         int j = 0;
@@ -367,10 +370,25 @@ private:
 
                           E.push_back(edge);
                           // try to force some predefined matches
-                          if (edge.weight >= 0.05f) {
-                            C[i][j] = edge.weight;
-                          } else {
-                            C[i][j] = -1/edge.weight;
+                          C[i][j] = edge.weight > 3.0f ? std::numeric_limits<float>::max() : edge.weight;
+                          if (edge.weight < 0.1f) {
+                            if (predefined_matches.find(i) == predefined_matches.end() || edge.weight < C[i][predefined_matches[i]]) {
+                                predefined_matches[i] = j;
+                                // for (int ii = 0; ii < C_CURR.size(); ++ii) {
+                                //   if (ii != i) {
+                                //     C[i][j] = std::numeric_limits<float>::max();
+                                //   }
+                                // }
+                                // for (int jj = 0; jj < C_PREV.size(); ++jj) {
+                                //   if (jj != j) {
+                                //     C[i][j] = std::numeric_limits<float>::max();
+                                //   }
+                                // }
+                            }
+      
+                            // RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", box_curr.cid, box_curr.cx, box_curr.cy, box_curr.length, box_curr.width);
+                            // RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", box_prev.cid, box_prev.cx, box_prev.cy, box_prev.length, box_prev.width);
+                            // RCLCPP_INFO(this->get_logger(), "i_curr (%d) -> j_prev (%d), LOSS IS %f", i, getClusterId(C_PREV[j]), edge.weight);
                           }
                           // T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
                       }
@@ -384,7 +402,7 @@ private:
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
 
-    std::vector<int> matchings = hungarian_assignment(C);
+    std::vector<int> matchings = hungarian_assignment(C, predefined_matches);
 
     std::vector<uint8_t> inactive_ids{}; 
 
@@ -410,7 +428,7 @@ private:
       }
     }
 
-    writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T);
+    writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T, predefined_matches);
 
     // given cluster_id of past C_PREV, output C_CURR s.t. the cluster_id is consistent 
     obstacles_msg.obstacles = C_CURR;
@@ -491,7 +509,9 @@ private:
       const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
       std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
       std::vector<int> matchings, std::vector<uint8_t> inactive_ids,
-      std::vector<std::vector<Transform>> T) {
+      std::vector<std::vector<Transform>> T,
+      std::unordered_map<int32_t, int32_t> predefined_matches
+    ) {
 
       sensor_msgs::msg::PointCloud2 bev_points;
       bev_points.header.frame_id = "rslidar";
@@ -536,11 +556,13 @@ private:
       }
 
       for (int curr_idx = 0; curr_idx < C_CURR.size(); ++curr_idx) {
-          RCLCPP_INFO(this->get_logger(), "BEFORE CLUSTER_ID (%d)", curr_idx);
+          // RCLCPP_INFO(this->get_logger(), "BEFORE CLUSTER_ID (%d)", curr_idx);
           // == LOGIC FOR SETTING CLUSTER_ID ==
           int prev_idx = curr_to_prev[curr_idx];
           uint32_t cluster_id;
-          if (prev_idx >= 0 && prev_idx < C_PREV.size()) {
+          if (predefined_matches.find(curr_idx) != predefined_matches.end()) {
+            cluster_id = getClusterId(C_PREV[predefined_matches[curr_idx]]);
+          } else if (prev_idx >= 0 && prev_idx < C_PREV.size()) {
             cluster_id = getClusterId(C_PREV[prev_idx]);
           } else {
             // if c_curr --- invalid c_prev: then this c_curr is not matched to anything: assign new unique cluster_id
@@ -554,7 +576,7 @@ private:
           }
     
           setClusterId(C_CURR[curr_idx], cluster_id);
-          RCLCPP_INFO(this->get_logger(), "RESULT CLUSTER_ID (%d)", cluster_id);
+          // RCLCPP_INFO(this->get_logger(), "RESULT CLUSTER_ID (%d)", cluster_id);
 
           std::vector<cv::Point2f> cv_points;
           cv_points.reserve(C_CURR[curr_idx].width * C_CURR[curr_idx].height);
@@ -610,7 +632,8 @@ private:
       throw std::runtime_error("id field not found");
   }
 
-  std::vector<int> hungarian_assignment(std::vector<std::vector<float>> mat)  {
+  std::vector<int> hungarian_assignment(std::vector<std::vector<float>> mat,
+                  std::unordered_map<int32_t, int32_t> predefined_matches)  {
     // i is the cluster id of C_PREV, job[i] is the cluster id of C_CURR
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
     // job[j_prev] = i_curr;
@@ -683,48 +706,6 @@ private:
     job.pop_back();
     return job;
   }
-
-  std::vector<int> hungarian_assignment_with_threshold(
-    const std::vector<std::vector<float>>& mat,
-    float max_cost = 2.0f,   // reject assignments above this
-    float min_cost = 0.05f    // force assignments below this
-) {
-    // Step 1: Run your existing Hungarian algorithm
-    std::vector<int> assignment = hungarian_assignment(mat);  // job[w] = i_curr
-
-    const int W = mat[0].size(); // C_PREV
-    const int J = mat.size();    // C_CURR
-
-    // Step 2: Reject assignments above max_cost
-    for (int w = 0; w < W; ++w) {
-        int iCurr = assignment[w];
-        if (iCurr >= 0) {
-            float cost = mat[iCurr][w];
-            if (cost > max_cost) {
-                assignment[w] = -1;  // treat as unassigned
-            }
-        }
-    }
-
-    // Step 3: Force very low-loss matches
-    for (int j = 0; j < J; ++j) {
-        float best_cost = mat[j][0];
-        int best_w = 0;
-        for (int w = 1; w < W; ++w) {
-            if (mat[j][w] < best_cost) {
-                best_cost = mat[j][w];
-                best_w = w;
-            }
-        }
-
-        // If this match is very good and C_PREV is not already assigned
-        if (best_cost < min_cost && assignment[best_w] == -1) {
-            assignment[best_w] = j;
-        }
-    }
-
-    return assignment;
-}
 
 
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr prev_pub_;
