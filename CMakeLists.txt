@@ -26,6 +26,8 @@ find_package(visualization_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Obstacle.msg"
   "msg/ObstacleArray.msg"
+  "msg/Box.msg"
+  "msg/Boxes.msg"
   DEPENDENCIES std_msgs geometry_msgs cev_msgs nav_msgs
 )
 

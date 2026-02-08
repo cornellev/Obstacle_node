@@ -9,6 +9,8 @@
 #include <pcl/common/common.h>
 #include "cev_msgs/msg/obstacles.hpp"
 #include "obstacle/msg/obstacle_array.hpp"
+#include "cev_msgs/msg/box.hpp"
+#include "cev_msgs/msg/boxes.hpp"
 #include "icp/icp.h"
 #include "icp/geo.h"
 #include "icp/driver.h"
@@ -44,6 +46,7 @@ struct Box {
   float length, width;
   float yaw, yaw_rate;
   int cid;
+  bool is_valid;
 };
 
 struct OBB {
@@ -251,6 +254,10 @@ private:
     // initialize the bipartite graph
     std::vector<sensor_msgs::msg::PointCloud2> C_PREV = obs_msg_prev_;
     std::vector<sensor_msgs::msg::PointCloud2> C_CURR = msg->obstacles;
+
+    /** for storing past boxes without having to recompute */
+    std::vector<Box> boxes_curr;
+
     cev_msgs::msg::Obstacles obstacles_msg;
     obstacles_msg.obstacles.reserve(C_CURR.size());
 
@@ -261,7 +268,8 @@ private:
     // hungarian algorithm takes in cost (adjacency) matrix where C_CURR is row
     // C_PREV is col
     std::vector<Edge> E;
-    int max_size = std::max(C_CURR.size(), C_PREV.size());
+    // int max_size = std::max(C_CURR.size(), C_PREV.size());
+    int max_size = std::max(C_CURR.size(), boxes_prev.size());
     std::vector<std::vector<float>> C(max_size, std::vector<float>(max_size, std::numeric_limits<float>::max()));
     std::vector<std::vector<Transform>> T(
         max_size,
@@ -275,22 +283,11 @@ private:
     // i.e. if (c_prev, c) is a match in max bipartite match, then set cluster_id of c_prev to be cluster_id of c
     if (max_size == 0) return;
 
-    auto start = std::chrono::high_resolution_clock::now();
-
-    visualization_msgs::msg::MarkerArray obb_markers;
-
-    // for (int j = 0; j < C_PREV.size(); ++j) {
-    //     RCLCPP_INFO(this->get_logger(), "c_prev %d", getClusterId(C_PREV[j]));
-    // }
-
     for (int i = 0; i < C_CURR.size(); ++i) {
-        int j = 0;
         // a current cluster
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
         if (c.width * c.height == 0) continue;
         
-        // icp::PointCloud<icp::ThreeD> icp_c = pc_to_icp_pc(c);
-
         std::vector<cv::Point2f> cv_points_curr;
         cv_points_curr.reserve(c.width * c.height);
 
@@ -309,13 +306,6 @@ private:
             z_max = std::max(z_max, *iter_z);
         };
 
-        auto maybe_m = generateOBB(getClusterId(C_CURR[i]), cloud, z_min, z_max);
-        if (maybe_m) { 
-          visualization_msgs::msg::Marker m = *maybe_m;
-          m.header.frame_id = "rslidar";
-          obb_markers.markers.push_back(m) ;
-        };
-
         if (cloud && cloud->points_.size() > 3) {
             cloud->RemoveNonFinitePoints();
             if (cloud->points_.size() > 3) {
@@ -328,79 +318,57 @@ private:
 
                 Eigen::Vector3d extent = obb.extent_;
 
-                Box box_curr{center.x(), center.y(), 0.0f, 0.0f, extent.x(), extent.z(), yaw, 0.0f, getClusterId(C_CURR[i])};  
-                // OBB box_curr{center, extent, yaw};
+                Box box_curr{center.x(), center.y(), 0.0f, 0.0f, extent.x(), extent.z(), yaw, 0.0f, getClusterId(C_CURR[i]), true};  
+                boxes_curr.push_back(box_curr);
 
-                for (int j = 0; j < C_PREV.size(); ++j) {
-                    sensor_msgs::msg::PointCloud2 c_prev = C_PREV[j];
+                auto start = std::chrono::high_resolution_clock::now();
 
-                    auto cloud_prev = std::make_shared<open3d::geometry::PointCloud>();
+                // for (int j = 0; j < C_PREV.size(); ++j) {
+                for (int j = 0; j < boxes_prev.size(); ++j) {
+                    Box box_prev = boxes_prev[j];
+                    
+                    if (!box_prev.is_valid) { continue; }
 
-                    sensor_msgs::PointCloud2ConstIterator<float> iter_x(c_prev, "x");
-                    sensor_msgs::PointCloud2ConstIterator<float> iter_y(c_prev, "y");
-                    sensor_msgs::PointCloud2ConstIterator<float> iter_z(c_prev, "z");
+                    Edge edge;
+                    edge.edge = std::make_tuple(j, i);
+                    edge.weight = boxLoss(box_curr, box_prev);
 
-                    for (; iter_x != iter_x.end(); ++iter_x, ++iter_y, ++iter_z) {
-                        cloud_prev->points_.push_back(Eigen::Vector3d(*iter_x, *iter_y, *iter_z));
-                    };
-
-                    if (cloud_prev && cloud_prev->points_.size() > 3) {
-                      cloud_prev->RemoveNonFinitePoints();
-                      if (cloud_prev->points_.size() > 3) {
-                          auto obb_prev = cloud_prev->GetOrientedBoundingBox();
-
-                          Eigen::Vector3d center_prev = obb_prev.center_;
-                          
-                          Eigen::Matrix3d R_prev = obb_prev.R_;
-                          double yaw_prev = std::atan2(R(1,0), R(0,0));
-
-                          Eigen::Vector3d extent_prev = obb_prev.extent_;
-                          
-                          Box box_prev{center_prev.x(), center_prev.y(), 0.0f, 0.0f, extent_prev.x(), extent_prev.z(), yaw_prev, 0.0f, getClusterId(c_prev)};  
-                          // OBB box_prev{center_prev, extent_prev, yaw_prev};
-                          // THIS IS A VERY BAD FUNCTION THAT IS TURNING FLOATS INTO INTS
-                          // if (transform.count(getClusterId(c_prev)) > 0) {
-                          //   box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
-                          // }
-
-                          Edge edge;
-                          edge.edge = std::make_tuple(j, i);
-                          edge.weight = boxLoss(box_curr, box_prev);
-                          // edge.weight = obbLoss(box_curr, box_prev);
-
-                          E.push_back(edge);
-                          // try to force some predefined matches
-                          C[i][j] = edge.weight > 3.0f ? std::numeric_limits<float>::max() : edge.weight;
-                          if (edge.weight < 0.1f) {
-                            if (predefined_matches.find(i) == predefined_matches.end() || edge.weight < C[i][predefined_matches[i]]) {
-                                predefined_matches[i] = j;
-                                // for (int ii = 0; ii < C_CURR.size(); ++ii) {
-                                //   if (ii != i) {
-                                //     C[i][j] = std::numeric_limits<float>::max();
-                                //   }
-                                // }
-                                // for (int jj = 0; jj < C_PREV.size(); ++jj) {
-                                //   if (jj != j) {
-                                //     C[i][j] = std::numeric_limits<float>::max();
-                                //   }
-                                // }
-                            }
-      
-                            // RCLCPP_INFO(this->get_logger(), "BOX A: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", box_curr.cid, box_curr.cx, box_curr.cy, box_curr.length, box_curr.width);
-                            // RCLCPP_INFO(this->get_logger(), "BOX B: cid (%d) => (cx, cy) : (%f, %f), (width, length) : (%f, %f)", box_prev.cid, box_prev.cx, box_prev.cy, box_prev.length, box_prev.width);
-                            // RCLCPP_INFO(this->get_logger(), "i_curr (%d) -> j_prev (%d), LOSS IS %f", i, getClusterId(C_PREV[j]), edge.weight);
-                          }
-                          // T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
+                    E.push_back(edge);
+                    // try to force some predefined matches
+                    C[i][j] = edge.weight;
+                    // C[i][j] = edge.weight > 3.0f ? std::numeric_limits<float>::max() : edge.weight;
+                    if (edge.weight < 0.05f) {
+                      // for static obstacles
+                      if (predefined_matches.find(i) == predefined_matches.end() || edge.weight < C[i][predefined_matches[i]]) {
+                          RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_curr.cx, box_curr.cy, box_curr.length, box_curr.width);
+                          RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_prev.cx, box_prev.cy, box_prev.length, box_prev.width);
+                          predefined_matches[i] = j;
                       }
                     }
+                    // DO NOT UNCOMMENT
+                    // OBB box_prev{center_prev, extent_prev, yaw_prev};
+                    // THIS IS A VERY BAD FUNCTION THAT IS TURNING FLOATS INTO INTS
+                    // if (transform.count(getClusterId(c_prev)) > 0) {
+                    //   box_prev = predictBox(box_prev, transform[getClusterId(c_prev)]);
+                    // }
+                    // DO NOT UNCOMMENT
+
+                    // T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
                 }
+
+                auto end = std::chrono::high_resolution_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+                RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
+            } else {
+                Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};  
+                boxes_curr.push_back(box_curr);
             }
+        } else {
+            Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};  
+            boxes_curr.push_back(box_curr);
+
         }
     }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-    RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
 
     std::vector<int> matchings = hungarian_assignment(C, predefined_matches);
 
@@ -428,23 +396,23 @@ private:
       }
     }
 
+    boxes_prev = boxes_curr;
     writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T, predefined_matches);
 
-    // given cluster_id of past C_PREV, output C_CURR s.t. the cluster_id is consistent 
+    // given cluster_id of past, output C_CURR s.t. the cluster_id is consistent 
     obstacles_msg.obstacles = C_CURR;
     match_pub_->publish(obstacles_msg);
 
     RCLCPP_INFO(this->get_logger(), "done");
 
     // instead of saving C_CURR, we make a prediction as to where the next matched cluster will be
-    // and save that predicition as obs_msg_prev_.
+    // and save that prediction as obs_msg_prev_.
 
     // naive bayes filter for prediction:
     // via markov assumption, we only need xt-1 for xt
     // i should define a global parameter that maps
     // cluster_id : prev pc, prev box, prev state (xt-1)
   // compute velocity via dx/dt
-    marker_pub_->publish(obb_markers);  
     obs_msg_prev_ = C_CURR;
   }
 
@@ -460,49 +428,36 @@ private:
     return color;
   }
 
-  std::optional<visualization_msgs::msg::Marker> generateOBB(int cid, std::shared_ptr<open3d::geometry::PointCloud> cloud, float z_min, float z_max) 
+  // std::optional<visualization_msgs::msg::Marker> generateOBB(int cid, std::shared_ptr<open3d::geometry::PointCloud> cloud, float z_min, float z_max) 
+  visualization_msgs::msg::Marker generateOBB(int cid, int bid, Box box, float z_min, float z_max) 
   {
-    if (cloud && cloud->points_.size() > 3) {
-        cloud->RemoveNonFinitePoints();
-        if (cloud->points_.size() > 3) {
-            auto obb = cloud->GetOrientedBoundingBox();
+    Eigen::AngleAxisd yaw_rot(box.yaw, Eigen::Vector3d::UnitZ());
+    Eigen::Quaterniond q(yaw_rot);
+    q.normalize();
 
-            Eigen::Vector3d center = obb.center_;
+    visualization_msgs::msg::Marker m;
+    m.ns = "obstacle";
+    m.id = bid;
+    m.type = visualization_msgs::msg::Marker::CUBE;
+    m.action = visualization_msgs::msg::Marker::ADD;
 
-            Eigen::Matrix3d R = obb.R_;
-            double yaw = std::atan2(R(1,0), R(0,0));
-            Eigen::AngleAxisd yaw_rot(yaw, Eigen::Vector3d::UnitZ());
-            Eigen::Quaterniond q(yaw_rot);
-            q.normalize();
+    // we will describe an OBB with: center, orientation, scale
+    // centroid
+    m.pose.position.x = box.cx;
+    m.pose.position.y = box.cy;
+    m.pose.position.z = (z_max + z_min) / 2;
 
-            Eigen::Vector3d extent = obb.extent_;
+    m.pose.orientation.x = q.x();
+    m.pose.orientation.y = q.y();
+    m.pose.orientation.z = q.z();
+    m.pose.orientation.w = q.w();
 
-            visualization_msgs::msg::Marker m;
-            m.ns = "obstacle";
-            m.id = cid;
-            m.type = visualization_msgs::msg::Marker::CUBE;
-            m.action = visualization_msgs::msg::Marker::ADD;
+    m.scale.x = box.length;
+    m.scale.y = box.width;
+    m.scale.z = z_max - z_min;
 
-            // we will describe an OBB with: center, orientation, scale
-            // centroid
-            m.pose.position.x = center.x();
-            m.pose.position.y = center.y();
-            m.pose.position.z = (z_max + z_min) / 2;
-
-            m.pose.orientation.x = q.x();
-            m.pose.orientation.y = q.y();
-            m.pose.orientation.z = q.z();
-            m.pose.orientation.w = q.w();
-
-            m.scale.x = extent.x();
-            m.scale.y = extent.z();
-            m.scale.z = z_max - z_min;
-
-            m.color = getColorFromId(m.id);
-            return m;
-        }
-    }
-    return std::nullopt;
+    m.color = getColorFromId(cid);
+    return m;
   }
 
   void writeClusterIds(
@@ -512,6 +467,7 @@ private:
       std::vector<std::vector<Transform>> T,
       std::unordered_map<int32_t, int32_t> predefined_matches
     ) {
+      visualization_msgs::msg::MarkerArray obb_markers;
 
       sensor_msgs::msg::PointCloud2 bev_points;
       bev_points.header.frame_id = "rslidar";
@@ -534,19 +490,10 @@ private:
       sensor_msgs::PointCloud2Iterator<uint8_t> out_b(bev_points, "b");
 
       RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d\n", C_PREV.size(), C_CURR.size());
-      for (int i = 0; i < matchings.size(); ++i) {
-        // job[j_prev] = i_curr;
-          int prev_idx = i;
-          int curr_idx = matchings[i];
-
-          if (prev_idx >= 0 && prev_idx < C_PREV.size()) {
-            RCLCPP_INFO(this->get_logger(), "match prev_idx [%d], %d -- curr_idx [%d]", prev_idx, getClusterId(C_PREV[prev_idx]), curr_idx);
-          }
-      }
-
-      RCLCPP_INFO(this->get_logger(), "\n");
+      RCLCPP_INFO(this->get_logger(), "matchings size: %d", matchings.size());
 
       std::vector<int> curr_to_prev(C_CURR.size(), -1);
+      // matchings is [i_curr] -> [j_prev]
       for (int prev_idx = 0; prev_idx < matchings.size(); ++prev_idx) {
           int curr_idx = matchings[prev_idx];
 
@@ -576,6 +523,7 @@ private:
           }
     
           setClusterId(C_CURR[curr_idx], cluster_id);
+          boxes_prev[curr_idx].cid = cluster_id;
           // RCLCPP_INFO(this->get_logger(), "RESULT CLUSTER_ID (%d)", cluster_id);
 
           std::vector<cv::Point2f> cv_points;
@@ -585,8 +533,13 @@ private:
           sensor_msgs::PointCloud2ConstIterator<float> in_y(C_CURR[curr_idx], "y");
           sensor_msgs::PointCloud2ConstIterator<float> in_z(C_CURR[curr_idx], "z");
 
+          float z_min = std::numeric_limits<float>::max();
+          float z_max = std::numeric_limits<float>::lowest();
+
           for (; in_x != in_x.end(); ++in_x, ++in_y, ++in_z) {
             cv_points.emplace_back(*in_x, *in_y);
+            z_min = std::min(z_min, *in_z);
+            z_max = std::max(z_max, *in_z);
 
             std_msgs::msg::ColorRGBA color = getColorFromId(cluster_id);
 
@@ -599,12 +552,22 @@ private:
             ++out_x; ++out_y; ++out_z;
             ++out_r; ++out_g; ++out_b;
           }
+  
+          if (boxes_prev[curr_idx].is_valid) {
+            visualization_msgs::msg::Marker m = generateOBB(cluster_id, curr_idx, boxes_prev[curr_idx], z_min, z_max);
+            m.header.frame_id = "rslidar";
+            m.header.stamp = this->now();
+            obb_markers.markers.push_back(m);
+          }
+
       } 
 
       bev_points.width = static_cast<uint32_t>(bev_points.data.size() / bev_points.point_step);
       bev_points.row_step = bev_points.point_step * bev_points.width;
 
       bev_pub_->publish(bev_points);
+      RCLCPP_INFO(this->get_logger(), "size %d", obb_markers.markers.size());
+      marker_pub_->publish(obb_markers); 
   }
 
   uint32_t getClusterId(const sensor_msgs::msg::PointCloud2& cloud)
@@ -637,6 +600,7 @@ private:
     // i is the cluster id of C_PREV, job[i] is the cluster id of C_CURR
     // find perfect matching from C_PREV to C_CURR that minimizes total assignment cost
     // job[j_prev] = i_curr;
+    // C[i][j]: J is curr, W is prev
     const int J = mat.size(); // cost_matrix.rows() is C_CURR idx
     assert(J > 0);
     const int W = mat[0].size(); // cost_matrix.cols() is C_PREV idx
@@ -713,6 +677,7 @@ private:
   rclcpp::Publisher<cev_msgs::msg::Obstacles>::SharedPtr match_pub_;
   sensor_msgs::msg::PointCloud2::SharedPtr msg_prev_;
   std::vector<sensor_msgs::msg::PointCloud2> obs_msg_prev_;
+  std::vector<Box> boxes_prev;
   std::unordered_map<int32_t, std::vector<PointXYZCluster>> C_prev_;
   rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
   // rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
