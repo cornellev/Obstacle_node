@@ -25,6 +25,7 @@
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
+#include <Eigen/Eigenvalues>
 
 using obstacle::msg::ObstacleArray;
 
@@ -66,7 +67,7 @@ public:
   ObstacleTracker()
   : Node("obstacle_tracker")
   {
-    bev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/bev_obstacles", 10);
+    bev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/rslidar_matches_points", 10);
     match_pub_ = this->create_publisher<cev_msgs::msg::Obstacles>("/rslidar_matches", 10);
     prev_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/prev", 10);
     curr_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/curr", 10);
@@ -251,9 +252,17 @@ private:
   }
 
   void obsCallback(const cev_msgs::msg::Obstacles::SharedPtr msg) {
+    auto start = std::chrono::high_resolution_clock::now();
+                
     // initialize the bipartite graph
     std::vector<sensor_msgs::msg::PointCloud2> C_PREV = obs_msg_prev_;
     std::vector<sensor_msgs::msg::PointCloud2> C_CURR = msg->obstacles;
+
+    RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d\n", C_PREV.size(), C_CURR.size());
+
+    // if (obs_msg_prev_.size() != C_CURR.size()) {
+    //     obs_msg_prev_.resize(C_CURR.size());
+    // }
 
     /** for storing past boxes without having to recompute */
     std::vector<Box> boxes_curr;
@@ -283,10 +292,12 @@ private:
     // i.e. if (c_prev, c) is a match in max bipartite match, then set cluster_id of c_prev to be cluster_id of c
     if (max_size == 0) return;
 
+    int num_degenerate = 0;
+
     for (int i = 0; i < C_CURR.size(); ++i) {
         // a current cluster
         sensor_msgs::msg::PointCloud2 c = C_CURR[i];
-        if (c.width * c.height == 0) continue;
+        if (c.data.empty() || c.point_step == 0) continue;
         
         std::vector<cv::Point2f> cv_points_curr;
         cv_points_curr.reserve(c.width * c.height);
@@ -309,6 +320,28 @@ private:
         if (cloud && cloud->points_.size() > 3) {
             cloud->RemoveNonFinitePoints();
             if (cloud->points_.size() > 3) {
+              Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+              for (const auto& p : cloud->points_) mean += p;
+              mean /= cloud->points_.size();
+
+              Eigen::Matrix3d cov = Eigen::Matrix3d::Zero();
+              for (const auto& p : cloud->points_) {
+                  Eigen::Vector3d d = p - mean;
+                  cov += d * d.transpose();
+              }
+
+              Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(cov);
+              float min_eigenvalue = solver.eigenvalues()(0);
+
+              if (min_eigenvalue < 1e-6f) {
+                  RCLCPP_WARN(this->get_logger(), "degenerate cloud");
+                  num_degenerate++;
+                  // Degenerate cloud — skip OBB, push invalid box
+                  Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};
+                  boxes_curr.push_back(box_curr);
+                  continue;
+              }
+              try {
                 auto obb = cloud->GetOrientedBoundingBox();
 
                 Eigen::Vector3d center = obb.center_;
@@ -320,8 +353,6 @@ private:
 
                 Box box_curr{center.x(), center.y(), 0.0f, 0.0f, extent.x(), extent.z(), yaw, 0.0f, getClusterId(C_CURR[i]), true};  
                 boxes_curr.push_back(box_curr);
-
-                auto start = std::chrono::high_resolution_clock::now();
 
                 // for (int j = 0; j < C_PREV.size(); ++j) {
                 for (int j = 0; j < boxes_prev.size(); ++j) {
@@ -340,8 +371,8 @@ private:
                     if (edge.weight < 0.05f) {
                       // for static obstacles
                       if (predefined_matches.find(i) == predefined_matches.end() || edge.weight < C[i][predefined_matches[i]]) {
-                          RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_curr.cx, box_curr.cy, box_curr.length, box_curr.width);
-                          RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_prev.cx, box_prev.cy, box_prev.length, box_prev.width);
+                          // RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_curr.cx, box_curr.cy, box_curr.length, box_curr.width);
+                          // RCLCPP_INFO(this->get_logger(), "(cx, cy): (%f, %f), (length, width): (%f, %f)", box_prev.cx, box_prev.cy, box_prev.length, box_prev.width);
                           predefined_matches[i] = j;
                       }
                     }
@@ -355,10 +386,12 @@ private:
 
                     // T[i][j] = Transform{computeVelocity(box_curr, box_prev), computeYawRate(box_curr, box_prev)};
                 }
-
-                auto end = std::chrono::high_resolution_clock::now();
-                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
-                RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms", duration.count());
+              } catch (const std::exception& e) {
+                RCLCPP_WARN(this->get_logger(), "OBB failed: %s", e.what());
+                Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};  
+                boxes_curr.push_back(box_curr);
+                continue;
+              }
             } else {
                 Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};  
                 boxes_curr.push_back(box_curr);
@@ -366,9 +399,10 @@ private:
         } else {
             Box box_curr{0.0f, 0.0f, 0.0f, 0.0f, 0, 0, 0.0f, 0.0f, 0, false};  
             boxes_curr.push_back(box_curr);
-
         }
     }
+
+    RCLCPP_INFO(this->get_logger(), "num_degenerate: %d", num_degenerate);
 
     std::vector<int> matchings = hungarian_assignment(C, predefined_matches);
 
@@ -396,24 +430,30 @@ private:
       }
     }
 
-    boxes_prev = boxes_curr;
-    writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T, predefined_matches);
+    bool any_valid = writeClusterIds(C_PREV, C_CURR, matchings, inactive_ids, T, predefined_matches, boxes_curr);
+    RCLCPP_INFO(this->get_logger(), "done, was there anything valid? %d", any_valid);
+    
+    if (any_valid != 0) { 
+      boxes_prev = boxes_curr;
+      // given cluster_id of past, output C_CURR s.t. the cluster_id is consistent 
+      obstacles_msg.obstacles = C_CURR;
+      match_pub_->publish(obstacles_msg);
 
-    // given cluster_id of past, output C_CURR s.t. the cluster_id is consistent 
-    obstacles_msg.obstacles = C_CURR;
-    match_pub_->publish(obstacles_msg);
+      // instead of saving C_CURR, we make a prediction as to where the next matched cluster will be
+      // and save that prediction as obs_msg_prev_.
 
-    RCLCPP_INFO(this->get_logger(), "done");
-
-    // instead of saving C_CURR, we make a prediction as to where the next matched cluster will be
-    // and save that prediction as obs_msg_prev_.
-
-    // naive bayes filter for prediction:
-    // via markov assumption, we only need xt-1 for xt
-    // i should define a global parameter that maps
-    // cluster_id : prev pc, prev box, prev state (xt-1)
-  // compute velocity via dx/dt
-    obs_msg_prev_ = C_CURR;
+      // naive bayes filter for prediction:
+      // via markov assumption, we only need xt-1 for xt
+      // i should define a global parameter that maps
+      // cluster_id : prev pc, prev box, prev state (xt-1)
+    // compute velocity via dx/dt
+      RCLCPP_INFO(this->get_logger(), "\033[32m obs_msg_prev_ updated to C_CURR \033[0m");
+      obs_msg_prev_ = C_CURR;
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    RCLCPP_INFO(this->get_logger(), "RAN FOR: %ld ms\n", duration.count());
   }
 
   std_msgs::msg::ColorRGBA getColorFromId(int cluster_id)
@@ -460,12 +500,13 @@ private:
     return m;
   }
 
-  void writeClusterIds(
+  bool writeClusterIds(
       const std::vector<sensor_msgs::msg::PointCloud2>& C_PREV,
       std::vector<sensor_msgs::msg::PointCloud2>& C_CURR,
       std::vector<int> matchings, std::vector<uint8_t> inactive_ids,
       std::vector<std::vector<Transform>> T,
-      std::unordered_map<int32_t, int32_t> predefined_matches
+      std::unordered_map<int32_t, int32_t> predefined_matches,
+      std::vector<Box>& boxes_curr
     ) {
       visualization_msgs::msg::MarkerArray obb_markers;
 
@@ -475,7 +516,7 @@ private:
 
       size_t total_points = 0;
       for (const auto &pts : C_CURR) {
-        total_points += pts.width * pts.height;
+        total_points += pts.point_step > 0 ? pts.data.size() / pts.point_step : 0;
       }
       
       sensor_msgs::PointCloud2Modifier modifier(bev_points);
@@ -489,18 +530,32 @@ private:
       sensor_msgs::PointCloud2Iterator<uint8_t> out_g(bev_points, "g");
       sensor_msgs::PointCloud2Iterator<uint8_t> out_b(bev_points, "b");
 
-      RCLCPP_INFO(this->get_logger(), "C_prev count: %d v. C_curr count: %d\n", C_PREV.size(), C_CURR.size());
-      RCLCPP_INFO(this->get_logger(), "matchings size: %d", matchings.size());
+      // RCLCPP_INFO(this->get_logger(), "matchings size: %d", matchings.size());
 
       std::vector<int> curr_to_prev(C_CURR.size(), -1);
       // matchings is [i_curr] -> [j_prev]
       for (int prev_idx = 0; prev_idx < matchings.size(); ++prev_idx) {
           int curr_idx = matchings[prev_idx];
-
+          if (prev_idx >= (int)C_PREV.size()) continue;
           if (curr_idx >= 0 && curr_idx < C_CURR.size()) {
             curr_to_prev[curr_idx] = prev_idx;
           }
       }
+
+      // Add before the for loop over C_CURR in writeClusterIds
+      size_t debug_total = 0;
+      for (int i = 0; i < C_CURR.size(); ++i) {
+          size_t declared = C_CURR[i].width * C_CURR[i].height;
+          size_t actual = C_CURR[i].data.size() / C_CURR[i].point_step;
+          debug_total += declared;
+          if (declared != actual) {
+              RCLCPP_ERROR(this->get_logger(), 
+                  "Cloud %d: declared %zu points but data holds %zu points (data.size=%zu, point_step=%u)",
+                  i, declared, actual, C_CURR[i].data.size(), C_CURR[i].point_step);
+          }
+      }
+      RCLCPP_INFO(this->get_logger(), "total_points allocated: %zu, bev data size: %zu", 
+          debug_total, bev_points.data.size());
 
       for (int curr_idx = 0; curr_idx < C_CURR.size(); ++curr_idx) {
           // RCLCPP_INFO(this->get_logger(), "BEFORE CLUSTER_ID (%d)", curr_idx);
@@ -523,7 +578,7 @@ private:
           }
     
           setClusterId(C_CURR[curr_idx], cluster_id);
-          boxes_prev[curr_idx].cid = cluster_id;
+          boxes_curr[curr_idx].cid = cluster_id;
           // RCLCPP_INFO(this->get_logger(), "RESULT CLUSTER_ID (%d)", cluster_id);
 
           std::vector<cv::Point2f> cv_points;
@@ -553,8 +608,8 @@ private:
             ++out_r; ++out_g; ++out_b;
           }
   
-          if (boxes_prev[curr_idx].is_valid) {
-            visualization_msgs::msg::Marker m = generateOBB(cluster_id, curr_idx, boxes_prev[curr_idx], z_min, z_max);
+          if (boxes_curr[curr_idx].is_valid) {
+            visualization_msgs::msg::Marker m = generateOBB(cluster_id, curr_idx, boxes_curr[curr_idx], z_min, z_max);
             m.header.frame_id = "rslidar";
             m.header.stamp = this->now();
             obb_markers.markers.push_back(m);
@@ -568,12 +623,17 @@ private:
       bev_pub_->publish(bev_points);
       RCLCPP_INFO(this->get_logger(), "size %d", obb_markers.markers.size());
       marker_pub_->publish(obb_markers); 
+
+      return debug_total > 0;
   }
 
   uint32_t getClusterId(const sensor_msgs::msg::PointCloud2& cloud)
   {
       for (const auto& field : cloud.fields) {
           if (field.name == "id") {
+              if (cloud.data.size() < field.offset + sizeof(uint32_t)) {
+                  return 0;  // not enough data
+              }
               const uint8_t* data_ptr = &cloud.data[field.offset];
               return *reinterpret_cast<const uint32_t*>(data_ptr);
           }
@@ -585,7 +645,8 @@ private:
   {
       for (auto& field : cloud.fields) {
           if (field.name == "id") {
-              for (size_t i = 0; i < cloud.width * cloud.height; ++i) {
+              size_t n_points = cloud.point_step > 0 ? cloud.data.size() / cloud.point_step : 0;
+              for (size_t i = 0; i < n_points; ++i) {
                   uint8_t* data_ptr = &cloud.data[i * cloud.point_step + field.offset];
                   *reinterpret_cast<uint32_t*>(data_ptr) = cluster_id;
               }
@@ -611,6 +672,8 @@ private:
     std::vector<float> answers;
     const float inf = std::numeric_limits<float>::max();
     const float eps = static_cast<float>(1e-9);
+
+    int num_invalid = 0;
 
     for (int jCur = 0; jCur < J; ++jCur) {  // assign jCur-th job
       int wCur = W;
@@ -641,6 +704,7 @@ private:
         }
 
         if (wNext == -1) {
+            num_invalid++;
             RCLCPP_ERROR(this->get_logger(), "No valid worker found!");
             break;
         }
@@ -666,6 +730,8 @@ private:
 
       answers.push_back(-yt[W]);
     }
+
+    RCLCPP_INFO(this->get_logger(), "num_invalid: %d", num_invalid);
 
     job.pop_back();
     return job;
