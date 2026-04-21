@@ -28,7 +28,7 @@ costmap_node:
       enabled: true
       observation_sources: pointcloud_sensor
       pointcloud_sensor:
-        topic: /your/pointcloud_topic   # ← your PointCloud2 topic
+        topic: /rslidar_points   # ← your PointCloud2 topic
         data_type: PointCloud2
         sensor_frame: ""                # leave blank to use cloud's frame_id
         observation_persistence: 0.0   # seconds to keep obs (0 = latest only)
