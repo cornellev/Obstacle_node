@@ -1,0 +1,49 @@
+costmap_node:
+  ros__parameters:
+
+    # --- Frame config ---
+    global_frame: map
+    robot_base_frame: base_link
+    transform_tolerance: 0.5
+
+    # --- Update rates ---
+    update_frequency: 10.0
+    publish_frequency: 5.0
+
+    # --- Grid dimensions ---
+    rolling_window: false   # true = local costmap that follows robot
+    width: 20               # meters (only if rolling_window: false)
+    height: 20
+    resolution: 0.05        # meters/cell
+
+    # --- Robot shape ---
+    robot_radius: 0.3       # circular robot
+    # footprint: "[[0.3, 0.2], [0.3, -0.2], [-0.3, -0.2], [-0.3, 0.2]]"  # polygon
+
+    # --- Plugins ---
+    plugins: ["obstacle_layer", "inflation_layer"]
+
+    obstacle_layer:
+      plugin: "nav2_costmap_2d::ObstacleLayer"
+      enabled: true
+      observation_sources: pointcloud_sensor
+      pointcloud_sensor:
+        topic: /your/pointcloud_topic   # ← your PointCloud2 topic
+        data_type: PointCloud2
+        sensor_frame: ""                # leave blank to use cloud's frame_id
+        observation_persistence: 0.0   # seconds to keep obs (0 = latest only)
+        expected_update_rate: 0.0      # 0 = no timeout check
+        min_obstacle_height: 0.0       # ignore floor points
+        max_obstacle_height: 2.0       # ignore ceiling points
+        obstacle_max_range: 6.0        # max range to mark occupied
+        obstacle_min_range: 0.0
+        raytrace_max_range: 20.0        # max range to clear free space
+        raytrace_min_range: 0.0
+        marking: true                  # mark obstacles
+        clearing: true                 # raycast to clear free space
+
+    inflation_layer:
+      plugin: "nav2_costmap_2d::InflationLayer"
+      enabled: true
+      inflation_radius: 0.55           # meters, should be >= robot_radius
+      cost_scaling_factor: 10.0        # higher = sharper cost falloff

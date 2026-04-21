@@ -22,6 +22,7 @@ find_package(Open3D REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+find_package(nav2_costmap_2d REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Obstacle.msg"
@@ -34,6 +35,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 add_executable(obstacle_node src/obstacle_node.cpp)
 add_executable(occupancy_grid src/occupancy_grid.cpp)
 add_executable(obstacle_tracker src/obstacle_tracker.cpp)
+add_executable(costmap_node src/costmap_node.cpp)
 
 ament_target_dependencies(
   obstacle_node 
@@ -79,6 +81,12 @@ ament_target_dependencies(
   visualization_msgs
 )
 
+ament_target_dependencies(costmap_node
+  rclcpp
+  nav2_costmap_2d
+  sensor_msgs
+)
+
 set(CEV_ICP_INCLUDE lib/cev_icp/include)
 set(CEV_ICP_LIB lib/cev_icp/lib)
 
@@ -121,6 +129,7 @@ install(TARGETS
   obstacle_node
   occupancy_grid
   obstacle_tracker
+  costmap_node
   DESTINATION lib/${PROJECT_NAME})
 
 
