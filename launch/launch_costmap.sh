@@ -3,9 +3,23 @@
 source /opt/ros/humble/setup.bash
 source /home/dev/ws/src/install/setup.bash
 
-echo "Building packages..."
+echo "Checking and building packages if needed..."
+
 cd /home/dev/ws/src
-colcon build --packages-select cev_msgs obstacle
+
+build_if_missing () {
+    PKG=$1
+
+    if ros2 pkg list | grep -qx "$PKG"; then
+        echo "Package '$PKG' already available, skipping build."
+    else
+        echo "Package '$PKG' not found, building..."
+        colcon build --packages-select "$PKG"
+    fi
+}
+
+build_if_missing cev_msgs
+build_if_missing obstacle
 
 echo "Sourcing workspace..."
 source /home/dev/ws/src/install/setup.bash
