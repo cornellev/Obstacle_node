@@ -2,12 +2,18 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <pcl_conversions/pcl_conversions.h>
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/common/common.h>
+#include "cev_msgs/msg/obstacles.hpp"
 #include "obstacle/msg/obstacle_array.hpp"
 
 #include <unordered_map>
 #include <vector>
 #include <cstdint>
 #include <opencv2/opencv.hpp>
+#include <open3d/Open3D.h>
 #include <tf2/LinearMath/Quaternion.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
@@ -27,8 +33,12 @@ public:
   ObstacleNode()
   : Node("obstacle_node")
   {
+    obs_sub_ = this->create_subscription<cev_msgs::msg::Obstacles>(
+      "/rslidar_obstacles", 10,
+      std::bind(&ObstacleNode::obstaclesCallback, this, std::placeholders::_1));
+
     pc_sub_ = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "input_points", 10,
+      "/rslidar_clusters", 10,
       std::bind(&ObstacleNode::pcCallback, this, std::placeholders::_1));
 
     obs_pub_ = this->create_publisher<ObstacleArray>("obstacles", 10);
@@ -38,6 +48,23 @@ public:
   }
 
 private:
+  void obstaclesCallback(const cev_msgs::msg::Obstacles::SharedPtr msg)
+  {
+    RCLCPP_INFO(this->get_logger(), "Received Obstacles message with %zu clouds", msg->obstacles.size());
+    
+    sensor_msgs::msg::PointCloud2 merged_cloud = msg->obstacles[0];
+
+    for (size_t i = 1; i < msg->obstacles.size(); ++i)
+    {
+        const auto &cloud = msg->obstacles[i];
+
+        pcl::concatenatePointCloud(merged_cloud, cloud, merged_cloud);
+    }
+
+    auto cloud_ptr = std::make_shared<sensor_msgs::msg::PointCloud2>(merged_cloud);
+    pcCallback(cloud_ptr);
+  }
+
   void pcCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
     // check required fields
     bool has_x=false, has_y=false, has_z=false, has_id=false;
@@ -53,7 +80,6 @@ private:
       return;
     }
 
-    
     sensor_msgs::PointCloud2ConstIterator<float> iter_x(*msg, "x");
     sensor_msgs::PointCloud2ConstIterator<float> iter_y(*msg, "y");
     sensor_msgs::PointCloud2ConstIterator<float> iter_z(*msg, "z");
@@ -71,11 +97,9 @@ private:
       ++total_points;
     }
 
-    RCLCPP_INFO(this->get_logger(),
-                "Received PointCloud2: points=%zu clusters=%zu",
-                total_points, clusters.size());
-
-
+    // RCLCPP_INFO(this->get_logger(),
+    //             "Received PointCloud2: points=%zu clusters=%zu",
+    //             total_points, clusters.size());
 
     // z-axis filtering
     const float z_min_allowed = 0.0f;   
@@ -92,136 +116,119 @@ private:
       float z_max = std::numeric_limits<float>::lowest();
 
       for (const auto &p : pts) {
-        z_min = std::min(z_min, p.z);
-        z_max = std::max(z_max, p.z);
-        if (p.z >= z_min_allowed && p.z <= z_max_allowed) {
-          kept.push_back(p);
-        }
+        kept.push_back(p);
       }
 
       if (!kept.empty()) {
         filtered_clusters[cid] = kept;
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d kept: %zu points (orig %zu, z_range=[%.2f, %.2f])",
-                    cid, kept.size(), pts.size(), z_min, z_max);
-      } else {
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d discarded (all points outside z range [%.2f, %.2f], orig z_range=[%.2f, %.2f])",
-                    cid, z_min_allowed, z_max_allowed, z_min, z_max);
-      }
+      } 
     }
 
-    RCLCPP_INFO(this->get_logger(),
-                "After filtering: %zu clusters remain", filtered_clusters.size());
 
     // === BEV projection + OBB ===
     ObstacleArray out;
     out.header = msg->header;
+    visualization_msgs::msg::MarkerArray obb_markers;
 
     for (const auto &kv : filtered_clusters) {
         int cid = kv.first;
         const auto &pts = kv.second;
 
         if (pts.size() < 3) {
-            RCLCPP_WARN(this->get_logger(),
-                        "Cluster %d has only %zu points, skipping OBB",
-                        cid, pts.size());
-            continue;
+          RCLCPP_WARN(this->get_logger(),
+                      "Cluster %d has only %zu points, skipping OBB",
+                      cid, pts.size());
+          continue;
+        } else {
+          auto maybe_m = generateOBB(cid, pts);
+          if (maybe_m) { 
+            visualization_msgs::msg::Marker m = *maybe_m;
+            m.header = msg->header;
+            m.header.frame_id = "rslidar";
+            obb_markers.markers.push_back(m) ;
+          };
         }
-
-        std::vector<cv::Point2f> cv_points;
-        cv_points.reserve(pts.size());
-        float z_min = std::numeric_limits<float>::max();
-        float z_max = std::numeric_limits<float>::lowest();
-        for (const auto &p : pts) {
-            cv_points.emplace_back(p.x, p.y);
-            z_min = std::min(z_min, p.z);
-            z_max = std::max(z_max, p.z);
-        }
-
-        cv::RotatedRect rect = cv::minAreaRect(cv_points);
-
-        float cx = rect.center.x;
-        float cy = rect.center.y;
-        float w = rect.size.width;
-        float h = rect.size.height;
-        float angle_deg = rect.angle;
-        float yaw = angle_deg * M_PI / 180.0f;
-
-        // length ≥ width
-        float length = std::max(w, h);
-        float width  = std::min(w, h);
-
-        // === Obstacle msg ===
-        obstacle::msg::Obstacle ob;
-        ob.id = cid;
-        ob.pose.position.x = cx;
-        ob.pose.position.y = cy;
-        ob.pose.position.z = 0.0;  // z_min
-        tf2::Quaternion q;
-        q.setRPY(0, 0, yaw);
-        ob.pose.orientation.x = q.x();
-        ob.pose.orientation.y = q.y();
-        ob.pose.orientation.z = q.z();
-        ob.pose.orientation.w = q.w();
-
-        ob.length = length;
-        ob.width  = width;
-        ob.z_min  = z_min;
-        ob.z_max  = z_max;
-
-    // if height <0.1m then not blocking
-        ob.blocking = (z_max - z_min > 0.1);
-
-        out.obstacles.push_back(ob);
-
-        RCLCPP_INFO(this->get_logger(),
-                    "Cluster %d -> obstacle center=(%.2f,%.2f), L=%.2f W=%.2f yaw=%.2f rad",
-                    cid, cx, cy, length, width, yaw);
     }
 
-    // === publish ObstacleArray ===
+    marker_pub_->publish(obb_markers);
     obs_pub_->publish(out);
-
-    visualization_msgs::msg::MarkerArray markers;
-    int id_counter = 0;
-
-    for (const auto &ob : out.obstacles) {
-        visualization_msgs::msg::Marker m;
-        m.header = out.header;
-        m.ns = "obstacle";
-        m.id = id_counter++;
-        m.type = visualization_msgs::msg::Marker::CUBE;
-        m.action = visualization_msgs::msg::Marker::ADD;
-
-        // centroid
-        m.pose = ob.pose;
-
-        // size
-        m.scale.x = ob.length;
-        m.scale.y = ob.width;
-        m.scale.z = ob.z_max - ob.z_min;
-
-        // z at the middle of the box
-        m.pose.position.z = (ob.z_min + ob.z_max) / 2.0;
-
-        // color(all red now)
-        m.color.r = 1.0;
-        m.color.g = 0.0;
-        m.color.b = 0.0;
-        m.color.a = 0.5;
-
-        markers.markers.push_back(m);
-    }
-    marker_pub_->publish(markers);
-
-
   }
 
+  std_msgs::msg::ColorRGBA getColorFromId(int cluster_id)
+  {
+    std_msgs::msg::ColorRGBA color;
+    uint32_t hash = static_cast<uint32_t>(cluster_id * 2654435761 % 4294967296); // Knuth's multiplicative hash
+    color.r = ((hash & 0xFF0000) >> 16) / 255.0f;
+    color.g = ((hash & 0x00FF00) >> 8) / 255.0f;
+    color.b = (hash & 0x0000FF) / 255.0f;
+    color.a = 0.5f;
+
+    return color;
+  }
+
+  std::optional<visualization_msgs::msg::Marker> generateOBB(int cid, std::vector<PointXYZCluster> pts) 
+  {
+    auto cloud = std::make_shared<open3d::geometry::PointCloud>();
+
+    float z_min = std::numeric_limits<float>::max();
+    float z_max = std::numeric_limits<float>::lowest();
+
+    for (const auto &p : pts) {
+        cloud->points_.push_back(Eigen::Vector3d(p.x, p.y, p.z));
+        z_min = std::min(z_min, p.z);
+        z_max = std::max(z_max, p.z);
+    }
+
+    if (cloud && cloud->points_.size() > 3) {
+        cloud->RemoveNonFinitePoints();
+        if (cloud->points_.size() > 3) {
+            auto obb = cloud->GetOrientedBoundingBox();
+
+            Eigen::Vector3d center = obb.center_;
+
+            Eigen::Matrix3d R = obb.R_;
+            double yaw = std::atan2(R(1,0), R(0,0));
+            Eigen::AngleAxisd yaw_rot(yaw, Eigen::Vector3d::UnitZ());
+            Eigen::Quaterniond q(yaw_rot);
+            q.normalize();
+
+            Eigen::Vector3d extent = obb.extent_;
+
+            visualization_msgs::msg::Marker m;
+            m.ns = "obstacle";
+            m.id = cid;
+            m.type = visualization_msgs::msg::Marker::CUBE;
+            m.action = visualization_msgs::msg::Marker::ADD;
+
+            // we will describe an OBB with: center, orientation, scale
+            // centroid
+            m.pose.position.x = center.x();
+            m.pose.position.y = center.y();
+            m.pose.position.z = (z_max + z_min) / 2;
+
+            m.pose.orientation.x = q.x();
+            m.pose.orientation.y = q.y();
+            m.pose.orientation.z = q.z();
+            m.pose.orientation.w = q.w();
+
+            m.scale.x = extent.x();
+            m.scale.y = extent.z();
+            m.scale.z = z_max - z_min;
+
+            m.color = getColorFromId(m.id);
+            return m;
+        }
+    }
+    return std::nullopt;
+  }
+
+  rclcpp::Subscription<cev_msgs::msg::Obstacles>::SharedPtr obs_sub_;
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;
   rclcpp::Publisher<ObstacleArray>::SharedPtr obs_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr marker_pub_;
 };
+
+#include "visualization_msgs/msg/marker_array.hpp"
 
 int main(int argc, char ** argv) {
   rclcpp::init(argc, argv);
